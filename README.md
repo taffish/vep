@@ -1,6 +1,6 @@
 # vep
 
-TAFFISH wrapper for Ensembl Variant Effect Predictor (VEP) 116.0, the Ensembl
+TAFFISH wrapper for Ensembl Variant Effect Predictor (VEP) 116.1, the Ensembl
 runtime for predicting functional consequences of genomic variants and running
 related VEP helper tools.
 
@@ -8,22 +8,24 @@ Package identity:
 
 - name: `vep`
 - command: `taf-vep`
-- version: `116.0-r1`
+- version: `116.1-r1`
 - kind: `tool`
-- image: `ghcr.io/taffish/vep:116.0-r1`
-- upstream: Ensembl VEP tag `release/116.0`
-- runtime version: `ensembl-vep 116.0`; cache version should be `116`
+- image: `ghcr.io/taffish/vep:116.1-r1`
+- upstream: Ensembl VEP tag `release/116.1`
+- runtime version: `ensembl-vep 116.1`; cache/API version remains `116`
 - app license: Apache-2.0
 - upstream license: Apache-2.0
 
 ## What Is Packaged
 
 This app uses the official Ensembl VEP Docker runtime
-`ensemblorg/ensembl-vep:release_116.0`, pinned by OCI manifest digest. The
+`ensemblorg/ensembl-vep:release_116.1`, pinned by OCI manifest digest. The
 runtime is built by Ensembl from the `Ensembl/ensembl-vep` source tree and
 includes VEP, Ensembl API modules, maintained VEP plugins, htslib tools,
 Bio::DB::HTS, Bio::DB::BigFile support, Haplosaurus dependencies, and
-GeneSplicer plugin support.
+GeneSplicer plugin support. The source tag resolves to commit
+`97c24b205f4ba8b44ccc75b839512a1d59104019`; the downloaded source archive has
+SHA-256 `959545e10ed443ff21d040a4fd277c640b9258bb2a4f08fe4355f702ed53b6ec`.
 
 The container exposes:
 
@@ -50,7 +52,7 @@ taf-vep vep --help
 ```
 
 `vep --version` is not an upstream VEP option. The upstream version is reported
-at the top of `vep --help` as `ensembl-vep          : 116.0`.
+at the top of `vep --help` as `ensembl-vep          : 116.1`.
 
 Annotate with an already prepared cache:
 
@@ -86,7 +88,8 @@ This app intentionally does not bundle Ensembl VEP caches, FASTA files, dbNSFP,
 ClinVar, gnomAD, CADD, AlphaMissense, SpliceAI, or other large annotation data.
 Those resources are species-, assembly-, release-, and license-dependent.
 
-For VEP 116.0, use Ensembl VEP cache version `116`. Prepare a persistent cache
+For VEP 116.1, use Ensembl VEP cache version `116`. Patch release `116.1` keeps
+the Ensembl API/cache generation at `116`. Prepare a persistent cache
 directory in your project or another host-visible location:
 
 ```sh
@@ -118,7 +121,6 @@ container:
 taf-vep -- --help
 taf-vep vep --help
 taf-vep filter_vep --help
-taf-vep perl -MBio::EnsEMBL::VEP::Constants -e 'print "ok\n"'
 ```
 
 ## Platform
@@ -135,17 +137,18 @@ specific plugins. Commands such as `INSTALL.pl -a c`, plugin data downloads,
 remote database mode, and `variant_recoder` database lookups may need network
 access unless all required data is already local.
 
-Smoke tests validate the VEP 116.0 runtime banner, helper command help, Perl
-module availability, htslib utilities, `filter_vep` on a synthetic VEP-CSQ VCF,
-and a real offline VEP annotation path using tiny synthetic GFF3, FASTA, and
-VCF files. Smoke does not download production caches or validate biological
-annotation correctness on real genomes.
+Smoke tests validate the VEP `116.1` runtime and `116.1` source constants,
+helper command help, Perl modules for HTS and BigWig access, htslib utilities,
+`filter_vep` on a synthetic VEP-CSQ VCF, and a real offline VEP annotation path
+using tiny synthetic GFF3, FASTA, and VCF files. Smoke does not download
+production caches or validate biological annotation correctness on real
+genomes.
 
 ## Upstream
 
 - homepage: <https://www.ensembl.org/info/docs/tools/vep/index.html>
 - repository: <https://github.com/Ensembl/ensembl-vep>
-- tag: <https://github.com/Ensembl/ensembl-vep/tree/release/116.0>
+- tag: <https://github.com/Ensembl/ensembl-vep/tree/release/116.1>
 - Docker image: <https://hub.docker.com/r/ensemblorg/ensembl-vep>
 - command-line documentation: <https://www.ensembl.org/info/docs/tools/vep/script/index.html>
 - cache documentation: <https://www.ensembl.org/info/docs/tools/vep/script/vep_cache.html>

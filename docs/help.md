@@ -1,7 +1,7 @@
-taf-vep 116.0-r1
+taf-vep 116.1-r1
 
 Purpose:
-  Run Ensembl Variant Effect Predictor (VEP) 116.0 and related helper tools
+  Run Ensembl Variant Effect Predictor (VEP) 116.1 and related helper tools
   inside a TAFFISH container.
 
 Usage:
@@ -36,7 +36,7 @@ Upstream help and version:
 
   VEP does not provide a vep --version option. The runtime version is printed
   in the vep --help banner as:
-    ensembl-vep          : 116.0
+    ensembl-vep          : 116.1
 
 Cache and FASTA:
   Production VEP annotation usually needs an Ensembl cache and often a FASTA.
@@ -61,7 +61,7 @@ Key outputs:
 
 Platform:
   Native linux/amd64 and linux/arm64 images are built from the official Ensembl
-  VEP release_116.0 Docker runtime.
+  VEP release_116.1 Docker runtime. VEP 116.1 still uses cache/API version 116.
 
 Boundaries:
   No production cache, FASTA bundle, Ensembl MySQL mirror, dbNSFP, ClinVar,

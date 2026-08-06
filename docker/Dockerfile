@@ -1,8 +1,9 @@
-FROM ensemblorg/ensembl-vep:release_116.0@sha256:f354dd8d09073e4d943acbbd02f5eb234a9d9e9d444371c1c349910f2123de11
+FROM ensemblorg/ensembl-vep:release_116.1@sha256:6972667883d89b9fa55e5cbe94f1b4c259ebc6bbd178310cef78f617e055eb75
 
-ARG VEP_VERSION=116.0
+ARG VEP_VERSION=116.1
 ARG VEP_CACHE_VERSION=116
-ARG VEP_SOURCE_REF=57ea5c52340acc1f156267f810ad162e26597082
+ARG VEP_SOURCE_REF=97c24b205f4ba8b44ccc75b839512a1d59104019
+ARG VEP_SOURCE_SHA256=959545e10ed443ff21d040a4fd277c640b9258bb2a4f08fe4355f702ed53b6ec
 
 ENV TAFFISH_ENV=TAFFISH
 ENV TAFFISH_NAME=vep
@@ -11,6 +12,7 @@ ENV TAFFISH_RELEASE=1
 ENV VEP_VERSION=${VEP_VERSION}
 ENV VEP_CACHE_VERSION=${VEP_CACHE_VERSION}
 ENV VEP_SOURCE_REF=${VEP_SOURCE_REF}
+ENV VEP_SOURCE_SHA256=${VEP_SOURCE_SHA256}
 
 USER root
 RUN set -eux; \
@@ -26,7 +28,7 @@ RUN set -eux; \
     bgzip -c /opt/taffish/share/vep/smoke/genes.gff3 > /opt/taffish/share/vep/smoke/genes.gff3.gz; \
     tabix -p gff /opt/taffish/share/vep/smoke/genes.gff3.gz; \
     printf "%b" "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t103\t.\tG\tA\t.\t.\t.\n" > /opt/taffish/share/vep/smoke/input.vcf; \
-    printf "%b" "##fileformat=VCFv4.2\n##VEP=\"v116.0\" API=\"v116\"\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t103\t.\tG\tA\t.\t.\tCSQ=A|missense_variant|MODERATE|GENE1|gene1|Transcript|tx1|protein_coding\nchr1\t150\t.\tG\tA\t.\t.\tCSQ=A|synonymous_variant|LOW|GENE1|gene1|Transcript|tx1|protein_coding\n" > /opt/taffish/share/vep/smoke/filter-input.vcf; \
+    printf "%b" "##fileformat=VCFv4.2\n##VEP=\"v116.1\" API=\"v116\"\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t103\t.\tG\tA\t.\t.\tCSQ=A|missense_variant|MODERATE|GENE1|gene1|Transcript|tx1|protein_coding\nchr1\t150\t.\tG\tA\t.\t.\tCSQ=A|synonymous_variant|LOW|GENE1|gene1|Transcript|tx1|protein_coding\n" > /opt/taffish/share/vep/smoke/filter-input.vcf; \
     chmod -R a+rX /opt/taffish
 
 USER vep
@@ -39,13 +41,16 @@ RUN set -eux; \
     variant_recoder --help 2>&1 | grep -F "VARIANT RECODER" >/dev/null; \
     filter_vep --help 2>&1 | grep -F "consequence data" >/dev/null; \
     INSTALL.pl --help 2>&1 | grep -F "default = ${VEP_CACHE_VERSION}" >/dev/null; \
-    perl -MBio::EnsEMBL::VEP::Constants -e 'print $Bio::EnsEMBL::VEP::Constants::VEP_VERSION,qq(\n)' | grep -Fx "${VEP_CACHE_VERSION}" >/dev/null; \
+    perl -MBio::EnsEMBL::VEP::Constants -e 'print join(qq(.), $Bio::EnsEMBL::VEP::Constants::VEP_VERSION, $Bio::EnsEMBL::VEP::Constants::VEP_SUB_VERSION), qq(\n)' | grep -Fx "${VEP_VERSION}" >/dev/null; \
     perl -MJSON -e 'print qq(JSON ok\n)' | grep -Fx "JSON ok" >/dev/null; \
     perl -MBio::DB::HTS -e 'print qq(HTS ok\n)' | grep -Fx "HTS ok" >/dev/null; \
+    perl -MBio::DB::BigFile -e 'print qq(BigFile ok\n)' | grep -Fx "BigFile ok" >/dev/null; \
     command -v bgzip >/dev/null; \
     command -v tabix >/dev/null; \
     command -v htsfile >/dev/null; \
-    command -v genesplicer >/dev/null
+    command -v genesplicer >/dev/null; \
+    test -s /plugins/CADD.pm; \
+    test -s /plugins/AlphaMissense.pm
 
 RUN set -eux; \
     tmp=/tmp/taf-vep-build-check; \
