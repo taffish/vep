@@ -1,81 +1,83 @@
-taf-vep 116.1-r1
+taf-vep 116.2-r1
 
 Purpose:
-  Run Ensembl Variant Effect Predictor (VEP) 116.1 and related helper tools
-  inside a TAFFISH container.
+  Annotate variants with Ensembl VEP 116.2, or run its packaged helper commands.
 
 Usage:
   taf-vep -- --help
-  taf-vep -- --cache --offline --dir_cache "$PWD/vep-data" -i variants.vcf -o out.vcf
-  taf-vep vep --help
-  taf-vep filter_vep --help
-  taf-vep COMMAND [ARGS...]
-
-Common workflows:
-  taf-vep -- --cache --offline --dir_cache "$PWD/vep-data" \
-    --species homo_sapiens --assembly GRCh38 --format vcf --vcf \
-    --force_overwrite -i variants.vcf -o variants.vep.vcf
-
   taf-vep -- --gff annotation.gff3.gz --fasta genome.fa.gz \
-    --format vcf --vcf --force_overwrite -i variants.vcf -o variants.vep.vcf
+    --format vcf --vcf --force_overwrite -i variants.vcf -o out.vcf
+  taf-vep filter_vep --help
 
-  taf-vep filter_vep --format vcf --filter "Consequence is missense_variant" \
-    -i variants.vep.vcf -o missense.vcf --force_overwrite
+Prepared cache use:
+  Select exactly one cache-116 species/assembly member:
+    TAFFISH_VEP_DATASET=homo_sapiens--GRCh38 \
+    taf-vep -- --cache --offline --species homo_sapiens --assembly GRCh38 \
+      -i variants.vcf -o out.txt --force_overwrite
 
-Packaged commands:
-  vep              Default Variant Effect Predictor command.
-  filter_vep       Filter VEP tabular or VCF/CSQ output.
-  haplo            Haplosaurus phased haplotype consequence tool.
-  variant_recoder  Translate variant IDs and HGVS-like encodings.
-  INSTALL.pl       Download/install VEP caches, FASTA files, API, or plugins.
+  Override discovery with TAFFISH_VEP_DATA_PATH=/absolute/prepared-member.
+  Disable discovery with TAFFISH_VEP_AUTO_MOUNT=0.
+  RefSeq/merged members also require VEP's --refseq/--merged analysis option.
 
-Upstream help and version:
-  taf-vep -- --help
-  taf-vep vep --help
-  taf-vep INSTALL.pl --help
+Install one cache + FASTA member:
+  Preview without download or writes:
+    taf-vep vep-install-data-116 --dry-run \
+      --species homo_sapiens --assembly GRCh38
 
-  VEP does not provide a vep --version option. The runtime version is printed
-  in the vep --help banner as:
-    ensembl-vep          : 116.1
+  Docker:
+    TAFFISH_CONTAINER_BACKEND=docker \
+    TAFFISH_VEP_DATA_INSTALL_ROOT="$HOME/.local/share/taffish/databases/vep" \
+    taf-vep vep-install-data-116 --species homo_sapiens --assembly GRCh38
 
-Cache and FASTA:
-  Production VEP annotation usually needs an Ensembl cache and often a FASTA.
-  This app does not bundle those large, species-specific data files.
+  Podman:
+    TAFFISH_CONTAINER_BACKEND=podman \
+    TAFFISH_VEP_DATA_INSTALL_ROOT="$HOME/.local/share/taffish/databases/vep" \
+    taf-vep vep-install-data-116 --species homo_sapiens --assembly GRCh38
 
-  Prepare human GRCh38 cache/FASTA for VEP 116:
-    mkdir -p vep-data
-    taf-vep INSTALL.pl -a cf -s homo_sapiens -y GRCh38 -c "$PWD/vep-data"
+  Apptainer:
+    TAFFISH_CONTAINER_BACKEND=apptainer \
+    TAFFISH_VEP_DATA_INSTALL_ROOT="$HOME/.local/share/taffish/databases/vep" \
+    taf-vep vep-install-data-116 --species homo_sapiens --assembly GRCh38
 
-  Reuse it offline:
-    taf-vep -- --cache --offline --dir_cache "$PWD/vep-data" \
-      --species homo_sapiens --assembly GRCh38 -i variants.vcf -o out.txt
+  Installation needs network and substantial free space. Analysis reuses the
+  completed member read-only and should normally use --offline. The helper never
+  downloads all members implicitly.
+
+Manual prepared-member mounts:
+  Docker:
+    TAFFISH_VEP_AUTO_MOUNT=0 \
+    TAFFISH_DOCKER_RUN_ARGS="-v /abs/member:/opt/taffish/vep-cache:ro" \
+    taf-vep -- --cache --offline -i variants.vcf -o out.txt
+
+  Podman:
+    TAFFISH_VEP_AUTO_MOUNT=0 \
+    TAFFISH_PODMAN_RUN_ARGS="-v /abs/member:/opt/taffish/vep-cache:ro" \
+    taf-vep -- --cache --offline -i variants.vcf -o out.txt
+
+  Apptainer:
+    TAFFISH_VEP_AUTO_MOUNT=0 \
+    TAFFISH_APPTAINER_RUN_ARGS="--bind /abs/member:/opt/taffish/vep-cache:ro" \
+    taf-vep -- --cache --offline -i variants.vcf -o out.txt
 
 Inputs:
-  VCF, VEP default input, HGVS-like identifiers, or coordinates depending on
-  VEP options. GFF3/GTF custom transcript sources should be bgzip/tabix indexed
-  and paired with a matching FASTA.
+  VCF, VEP text, HGVS/identifier/coordinate forms, or indexed GFF3/GTF plus FASTA.
 
 Key outputs:
-  VEP tabular text, VCF with CSQ annotations, JSON, statistics files, and helper
-  outputs depending on selected upstream options.
+  VEP text, VCF with CSQ annotations, JSON, statistics and command-specific files.
 
-Platform:
-  Native linux/amd64 and linux/arm64 images are built from the official Ensembl
-  VEP release_116.1 Docker runtime. VEP 116.1 still uses cache/API version 116.
+Immediate notes:
+  vep has no --version option; taf-vep -- --help shows ensembl-vep 116.2.
+  Cache/API generation remains 116. Plugin data are not bundled.
+  Invalid explicit resource roots fail closed; no selector means no auto-mount.
 
-Boundaries:
-  No production cache, FASTA bundle, Ensembl MySQL mirror, dbNSFP, ClinVar,
-  gnomAD, CADD, AlphaMissense, SpliceAI, or plugin data is bundled.
-  Commands that download caches or query remote databases require network
-  access. For reproducible flows, pre-stage cache data and run with --offline.
-
-Detailed documentation:
-  https://www.ensembl.org/info/docs/tools/vep/index.html
+More help:
+  taf-vep vep --help
+  taf-vep INSTALL.pl --help
   https://www.ensembl.org/info/docs/tools/vep/script/index.html
-  https://www.ensembl.org/info/docs/tools/vep/script/vep_cache.html
+  https://github.com/taffish/vep
 
 Wrapper options:
   taf-vep --help       Show this TAFFISH help.
   taf-vep --version    Show TAFFISH wrapper version.
-  taf-vep --compile    Compile the TAFFISH wrapper.
+  taf-vep --compile    Print the generated wrapper shell.
   taf-vep -- --help    Pass option-leading arguments to default vep.

@@ -1,0 +1,396 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Digest::SHA qw(sha256_hex);
+use Fcntl qw(:flock);
+use File::Find qw(find);
+use File::Path qw(make_path remove_tree);
+use File::Spec;
+use Getopt::Long qw(GetOptions);
+use JSON;
+
+my $APP_RELEASE = '116.2-r1';
+my $VEP_VERSION = '116.2';
+my $CACHE_VERSION = '116';
+my $INSTALL_MOUNT = '/data-install';
+my $DATA_ROOT = "$INSTALL_MOUNT/release-$CACHE_VERSION";
+my $MANIFEST = 'TAFFISH_VEP_DATA_MANIFEST.json';
+my $INVENTORY = 'TAFFISH_VEP_DATA_INVENTORY.tsv';
+my $READY = 'TAFFISH_VEP_DATA_READY';
+
+my ($species, $assembly);
+my $minimum_free_gb = 10;
+my ($force, $verify_only, $dry_run, $help) = (0, 0, 0, 0);
+
+GetOptions(
+  'species=s'    => \$species,
+  'assembly=s'   => \$assembly,
+  'min-free-gb=f' => \$minimum_free_gb,
+  'force'        => \$force,
+  'verify-only'  => \$verify_only,
+  'dry-run'      => \$dry_run,
+  'help'         => \$help,
+) or usage(2);
+
+usage(0) if $help;
+die "vep-install-data-116: unexpected positional arguments\n" if @ARGV;
+die "vep-install-data-116: --species is required\n" unless defined $species;
+die "vep-install-data-116: --assembly is required\n" unless defined $assembly;
+die "vep-install-data-116: --species must be one exact member, not all\n"
+  if lc($species) eq 'all';
+die "vep-install-data-116: unsafe --species value\n"
+  unless $species =~ /\A[a-z][a-z0-9_]*\z/;
+die "vep-install-data-116: unsafe --assembly value\n"
+  unless $assembly =~ /\A[A-Za-z0-9][A-Za-z0-9_.+-]*\z/;
+die "vep-install-data-116: --min-free-gb cannot be negative\n"
+  if $minimum_free_gb < 0;
+die "vep-install-data-116: --force and --verify-only cannot be combined\n"
+  if $force && $verify_only;
+
+my $dataset_id = "$species--$assembly";
+my $destination = "$DATA_ROOT/$dataset_id";
+my $base_species = $species;
+$base_species =~ s/_(?:refseq|merged)\z//;
+
+print_plan();
+exit 0 if $dry_run;
+
+require_install_mount();
+make_real_directory($DATA_ROOT);
+require_free_space($DATA_ROOT, $minimum_free_gb);
+
+my $lock_path = "$DATA_ROOT/.taffish-vep-release-$CACHE_VERSION.lock";
+open(my $lock, '>>', $lock_path)
+  or die "vep-install-data-116: cannot open lock $lock_path: $!\n";
+chmod 0644, $lock_path;
+flock($lock, LOCK_EX | LOCK_NB)
+  or die "vep-install-data-116: another VEP data operation holds $lock_path\n";
+
+if ($verify_only) {
+  verify_dataset($destination, 1);
+  print "Verified dataset: $destination\n";
+  exit 0;
+}
+
+if (-e $destination && !$force) {
+  verify_dataset($destination, 1);
+  print "Existing complete dataset retained: $destination\n";
+  exit 0;
+}
+
+my @stale = grep { -e $_ } glob("$DATA_ROOT/.$dataset_id.staging-*");
+push @stale, grep { -e $_ } glob("$DATA_ROOT/.$dataset_id.backup-*");
+if (@stale) {
+  die "vep-install-data-116: unfinished transaction data requires review: " .
+      join(', ', @stale) . "\n";
+}
+
+my $staging = "$DATA_ROOT/.$dataset_id.staging-$$";
+mkdir($staging, 0755)
+  or die "vep-install-data-116: cannot create staging directory $staging: $!\n";
+
+my $installed = eval {
+  local $ENV{VEP_NO_UPDATE} = 1;
+  my @command = (
+    'INSTALL.pl',
+    '--AUTO', 'cf',
+    '--SPECIES', $species,
+    '--ASSEMBLY', $assembly,
+    '--CACHEDIR', $staging,
+    '--CACHE_VERSION', $CACHE_VERSION,
+    '--NO_UPDATE',
+    '--USE_HTTPS_PROTO',
+  );
+  print "Running official installer for one exact dataset member\n";
+  system(@command);
+  my $status = $?;
+  die "official INSTALL.pl failed with status $status\n" if $status != 0;
+
+  my $cache_dir = "$staging/$species/${CACHE_VERSION}_$assembly";
+  die "expected cache/FASTA directory is missing: $cache_dir\n"
+    unless -d $cache_dir;
+
+  my $inventory = build_inventory($staging);
+  die "installed dataset contains no regular files\n" unless @$inventory;
+  my $inventory_text = "path\tsize\tsha256\n";
+  my $total_bytes = 0;
+  for my $entry (@$inventory) {
+    $inventory_text .= join("\t", @$entry{qw(path size sha256)}) . "\n";
+    $total_bytes += $entry->{size};
+  }
+  atomic_write("$staging/$INVENTORY", $inventory_text);
+
+  my $manifest = {
+    schema => 'taffish.vep.dataset.v1',
+    app_release => $APP_RELEASE,
+    vep_version => $VEP_VERSION,
+    cache_version => $CACHE_VERSION,
+    dataset_id => $dataset_id,
+    species => $species,
+    assembly => $assembly,
+    components => ['indexed_vep_cache', 'reference_fasta'],
+    cache_archive => "${species}_vep_${CACHE_VERSION}_${assembly}.tar.gz",
+    cache_base_url => "https://ftp.ensembl.org/pub/release-$CACHE_VERSION/variation/indexed_vep_cache",
+    cache_integrity => 'official POSIX CHECKSUMS verified by Ensembl INSTALL.pl; installed files recorded with SHA-256',
+    fasta_base_url => "https://ftp.ensembl.org/pub/release-$CACHE_VERSION/fasta/$base_species/dna",
+    fasta_selection => 'primary_assembly.fa.gz, falling back to toplevel.fa.gz',
+    fasta_integrity => 'official HTTPS acquisition; installed files recorded with SHA-256',
+    file_count => scalar(@$inventory),
+    total_bytes => $total_bytes,
+    inventory_sha256 => sha256_hex($inventory_text),
+    resource_license => 'Ensembl data terms and source-database terms apply separately from the VEP software license',
+  };
+  my $json = JSON->new->canonical(1)->pretty(1)->encode($manifest);
+  atomic_write("$staging/$MANIFEST", $json);
+  atomic_write("$staging/$READY", "$dataset_id\n");
+  set_shared_permissions($staging);
+  verify_dataset($staging, 1);
+  1;
+};
+
+unless ($installed) {
+  my $error = $@ || 'unknown installation failure';
+  remove_tree($staging) if -e $staging;
+  die "vep-install-data-116: $error";
+}
+
+my $backup;
+if (-e $destination) {
+  $backup = "$DATA_ROOT/.$dataset_id.backup-$$";
+  rename($destination, $backup)
+    or die "vep-install-data-116: cannot preserve existing dataset: $!\n";
+}
+
+unless (rename($staging, $destination)) {
+  my $error = $!;
+  rename($backup, $destination) if defined($backup) && -e $backup;
+  die "vep-install-data-116: atomic promotion failed: $error\n";
+}
+
+if (defined $backup) {
+  my $errors = [];
+  remove_tree($backup, {error => $errors});
+  if (@$errors) {
+    unlink "$destination/$READY";
+    die "vep-install-data-116: replacement succeeded but old backup cleanup failed: $backup\n";
+  }
+}
+
+print "Dataset ready: $destination\n";
+print "Files are mode 0644 and directories are mode 0755 for shared read-only reuse.\n";
+
+sub usage {
+  my ($status) = @_;
+  print <<'USAGE';
+Usage:
+  vep-install-data-116 --species SPECIES --assembly ASSEMBLY [OPTIONS]
+
+Install one explicit VEP cache 116 plus matching reference FASTA into a staged,
+verified and versioned dataset root. The helper never accepts an implicit "all".
+
+Options:
+  --species NAME       Exact Ensembl species identifier, e.g. homo_sapiens.
+  --assembly NAME      Exact assembly identifier, e.g. GRCh38.
+  --min-free-gb N      Minimum free space before install (default: 10).
+  --dry-run            Print identity, sources and integrity plan without writing.
+  --verify-only        Deep-verify an existing manifest and SHA-256 inventory.
+  --force              Atomically replace an existing verified dataset.
+  --help               Show this help.
+
+Host install root:
+  Set TAFFISH_VEP_DATA_INSTALL_ROOT to a writable personal or administrator
+  parent. The wrapper mounts it at /data-install. The completed member is:
+    release-116/SPECIES--ASSEMBLY
+USAGE
+  exit $status;
+}
+
+sub print_plan {
+  print "VEP runtime: $VEP_VERSION ($APP_RELEASE)\n";
+  print "VEP cache/API generation: $CACHE_VERSION\n";
+  print "Dataset ID: $dataset_id\n";
+  print "Destination: $destination\n";
+  print "Cache archive: ${species}_vep_${CACHE_VERSION}_${assembly}.tar.gz\n";
+  print "Cache source: https://ftp.ensembl.org/pub/release-$CACHE_VERSION/variation/indexed_vep_cache\n";
+  print "Cache integrity: official CHECKSUMS plus installed SHA-256 inventory\n";
+  print "FASTA source: https://ftp.ensembl.org/pub/release-$CACHE_VERSION/fasta/$base_species/dna\n";
+  print "FASTA selection: primary assembly, falling back to toplevel\n";
+  print "Published compressed size: resolved by the official installer; not fixed in this app because the release directory is an upstream selectable catalog\n";
+  print "Minimum free space: $minimum_free_gb GiB\n";
+  print "Resource license: Ensembl data and source-database terms apply separately; see the app README\n";
+}
+
+sub require_install_mount {
+  die "vep-install-data-116: set TAFFISH_VEP_DATA_INSTALL_ROOT on the host; refusing an ephemeral install\n"
+    unless ($ENV{TAFFISH_VEP_DATA_INSTALL_MOUNTED} || '') eq '1';
+  die "vep-install-data-116: $INSTALL_MOUNT is not a directory\n"
+    unless -d $INSTALL_MOUNT;
+  open(my $mounts, '<', '/proc/self/mountinfo')
+    or die "vep-install-data-116: cannot inspect /proc/self/mountinfo: $!\n";
+  my $found = 0;
+  while (my $line = <$mounts>) {
+    my @fields = split / /, $line;
+    next unless @fields >= 5;
+    my $mountpoint = $fields[4];
+    $mountpoint =~ s/\\040/ /g;
+    $mountpoint =~ s/\\011/\t/g;
+    $mountpoint =~ s/\\012/\n/g;
+    $mountpoint =~ s/\\134/\\/g;
+    $found = 1 if $mountpoint eq $INSTALL_MOUNT;
+  }
+  close $mounts;
+  die "vep-install-data-116: $INSTALL_MOUNT is not an actual bind/volume mount\n"
+    unless $found;
+}
+
+sub make_real_directory {
+  my ($path) = @_;
+  make_path($path, {mode => 0755}) unless -e $path;
+  my @metadata = lstat($path);
+  die "vep-install-data-116: data root must be a non-symlink directory: $path\n"
+    unless @metadata && -d _ && !-l _;
+  chmod 0755, $path;
+}
+
+sub require_free_space {
+  my ($path, $minimum_gb) = @_;
+  open(my $df, '-|', 'df', '-Pk', $path)
+    or die "vep-install-data-116: cannot run df: $!\n";
+  my @lines = <$df>;
+  close($df) or die "vep-install-data-116: df failed\n";
+  my $last = $lines[-1] || '';
+  my @fields = split /\s+/, $last;
+  die "vep-install-data-116: unable to parse free space for $path\n"
+    unless @fields >= 4 && $fields[3] =~ /^\d+$/;
+  my $available_bytes = $fields[3] * 1024;
+  my $required_bytes = int($minimum_gb * 1024 * 1024 * 1024);
+  die sprintf("vep-install-data-116: insufficient free space: need %.2f GiB, have %.2f GiB\n",
+      $minimum_gb, $available_bytes / (1024 ** 3))
+    if $available_bytes < $required_bytes;
+}
+
+sub atomic_write {
+  my ($path, $content) = @_;
+  my $temporary = "$path.tmp-$$";
+  open(my $handle, '>', $temporary)
+    or die "cannot write $temporary: $!\n";
+  binmode $handle;
+  print {$handle} $content;
+  close($handle) or die "cannot close $temporary: $!\n";
+  chmod 0644, $temporary;
+  rename($temporary, $path) or die "cannot promote $path: $!\n";
+}
+
+sub file_sha256 {
+  my ($path) = @_;
+  open(my $handle, '<', $path) or die "cannot read $path: $!\n";
+  binmode $handle;
+  my $digest = Digest::SHA->new(256);
+  $digest->addfile($handle);
+  close $handle;
+  return $digest->hexdigest;
+}
+
+sub build_inventory {
+  my ($root) = @_;
+  my @entries;
+  find({
+    no_chdir => 1,
+    wanted => sub {
+      my $path = $File::Find::name;
+      return if $path eq $root;
+      die "installed dataset contains a symlink: $path\n" if -l $path;
+      return unless -f $path;
+      my $relative = File::Spec->abs2rel($path, $root);
+      die "unsafe inventory path: $relative\n"
+        if $relative =~ /[\t\r\n]/ || $relative =~ m{(?:\A|/)\.\.(?:/|\z)};
+      push @entries, {
+        path => $relative,
+        size => -s $path,
+        sha256 => file_sha256($path),
+      };
+    },
+  }, $root);
+  return [sort { $a->{path} cmp $b->{path} } @entries];
+}
+
+sub set_shared_permissions {
+  my ($root) = @_;
+  find({
+    no_chdir => 1,
+    wanted => sub {
+      my $path = $File::Find::name;
+      die "installed dataset contains a symlink: $path\n" if -l $path;
+      chmod((-d $path ? 0755 : 0644), $path)
+        or die "cannot set shared permissions on $path: $!\n";
+    },
+  }, $root);
+}
+
+sub verify_dataset {
+  my ($root, $deep) = @_;
+  die "dataset directory is missing: $root\n" unless -d $root && !-l $root;
+  for my $name ($MANIFEST, $INVENTORY, $READY) {
+    die "dataset metadata is missing: $root/$name\n"
+      unless -f "$root/$name" && !-l "$root/$name";
+  }
+  open(my $manifest_handle, '<', "$root/$MANIFEST")
+    or die "cannot read dataset manifest: $!\n";
+  my $manifest_text;
+  {
+    local $/;
+    $manifest_text = <$manifest_handle>;
+  }
+  close $manifest_handle;
+  my $manifest = eval { JSON->new->decode($manifest_text) };
+  die "dataset manifest is not valid JSON\n" unless ref($manifest) eq 'HASH';
+  die "dataset manifest schema mismatch\n"
+    unless ($manifest->{schema} || '') eq 'taffish.vep.dataset.v1';
+  die "dataset cache generation mismatch\n"
+    unless ($manifest->{cache_version} || '') eq $CACHE_VERSION;
+  die "dataset identity mismatch\n"
+    unless ($manifest->{dataset_id} || '') eq $dataset_id &&
+           ($manifest->{species} || '') eq $species &&
+           ($manifest->{assembly} || '') eq $assembly;
+
+  open(my $ready_handle, '<', "$root/$READY")
+    or die "cannot read dataset ready marker: $!\n";
+  my $ready_value = <$ready_handle> // '';
+  close $ready_handle;
+  chomp $ready_value;
+  die "dataset ready marker mismatch\n" unless $ready_value eq $dataset_id;
+
+  open(my $inventory_handle, '<', "$root/$INVENTORY")
+    or die "cannot read dataset inventory: $!\n";
+  my $header = <$inventory_handle> // '';
+  die "dataset inventory header mismatch\n" unless $header eq "path\tsize\tsha256\n";
+  my $count = 0;
+  my $total = 0;
+  while (my $line = <$inventory_handle>) {
+    chomp $line;
+    my ($relative, $size, $sha256) = split /\t/, $line, -1;
+    die "malformed dataset inventory entry\n"
+      unless defined($sha256) && $size =~ /^\d+$/ && $sha256 =~ /^[0-9a-f]{64}$/;
+    die "unsafe dataset inventory path: $relative\n"
+      if $relative eq '' || File::Spec->file_name_is_absolute($relative) ||
+         $relative =~ m{(?:\A|/)\.\.(?:/|\z)};
+    my $path = "$root/$relative";
+    die "inventoried file is missing or unsafe: $path\n"
+      unless -f $path && !-l $path && (-s $path) == $size;
+    die "SHA-256 mismatch: $path\n"
+      if $deep && file_sha256($path) ne $sha256;
+    $count++;
+    $total += $size;
+  }
+  close $inventory_handle;
+  die "dataset inventory is empty\n" unless $count;
+  die "dataset manifest file count mismatch\n"
+    unless ($manifest->{file_count} || 0) == $count;
+  die "dataset manifest byte count mismatch\n"
+    unless ($manifest->{total_bytes} || 0) == $total;
+
+  my $cache_dir = "$root/$species/${CACHE_VERSION}_$assembly";
+  die "dataset cache/FASTA directory is missing: $cache_dir\n" unless -d $cache_dir;
+}

@@ -1,9 +1,9 @@
-FROM ensemblorg/ensembl-vep:release_116.1@sha256:6972667883d89b9fa55e5cbe94f1b4c259ebc6bbd178310cef78f617e055eb75
+FROM ensemblorg/ensembl-vep:release_116.2@sha256:b5c4839c194cfcc148dd6a34393623fd4fdb0239d03d29af10c5b5a461ec366a
 
-ARG VEP_VERSION=116.1
+ARG VEP_VERSION=116.2
 ARG VEP_CACHE_VERSION=116
-ARG VEP_SOURCE_REF=97c24b205f4ba8b44ccc75b839512a1d59104019
-ARG VEP_SOURCE_SHA256=959545e10ed443ff21d040a4fd277c640b9258bb2a4f08fe4355f702ed53b6ec
+ARG VEP_SOURCE_REF=2cb0bbe216bb31c75de8f8000e2da7ff4fb7b451
+ARG VEP_SOURCE_SHA256=834e9c9c82ed1b656a655ab126a4596e4808dcd984f5cb72ecb88b48c7ed28f9
 
 ENV TAFFISH_ENV=TAFFISH
 ENV TAFFISH_NAME=vep
@@ -11,12 +11,18 @@ ENV TAFFISH_VERSION=${VEP_VERSION}
 ENV TAFFISH_RELEASE=1
 ENV VEP_VERSION=${VEP_VERSION}
 ENV VEP_CACHE_VERSION=${VEP_CACHE_VERSION}
+ENV VEP_DIR_CACHE=/opt/taffish/vep-cache
 ENV VEP_SOURCE_REF=${VEP_SOURCE_REF}
 ENV VEP_SOURCE_SHA256=${VEP_SOURCE_SHA256}
 
 USER root
+COPY docker/vep-install-data-116 /usr/local/bin/vep-install-data-116
 RUN set -eux; \
-    mkdir -p /opt/taffish/share/vep/smoke; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libhtml-tableextract-perl; \
+    rm -rf /var/lib/apt/lists/*; \
+    chmod 0755 /usr/local/bin/vep-install-data-116; \
+    mkdir -p /opt/taffish/share/vep/smoke /opt/taffish/vep-cache; \
     perl -e 'print ">chr1\n", "N" x 99, "ATG", "GAA" x 20, "TAA", "N" x 200, "\n"' > /opt/taffish/share/vep/smoke/ref.fa; \
     printf "%s\n" \
       "##gff-version 3" \
@@ -28,7 +34,7 @@ RUN set -eux; \
     bgzip -c /opt/taffish/share/vep/smoke/genes.gff3 > /opt/taffish/share/vep/smoke/genes.gff3.gz; \
     tabix -p gff /opt/taffish/share/vep/smoke/genes.gff3.gz; \
     printf "%b" "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t103\t.\tG\tA\t.\t.\t.\n" > /opt/taffish/share/vep/smoke/input.vcf; \
-    printf "%b" "##fileformat=VCFv4.2\n##VEP=\"v116.1\" API=\"v116\"\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t103\t.\tG\tA\t.\t.\tCSQ=A|missense_variant|MODERATE|GENE1|gene1|Transcript|tx1|protein_coding\nchr1\t150\t.\tG\tA\t.\t.\tCSQ=A|synonymous_variant|LOW|GENE1|gene1|Transcript|tx1|protein_coding\n" > /opt/taffish/share/vep/smoke/filter-input.vcf; \
+    printf "%b" "##fileformat=VCFv4.2\n##VEP=\"v116.2\" API=\"v116\"\n##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP. Format: Allele|Consequence|IMPACT|SYMBOL|Gene|Feature_type|Feature|BIOTYPE\">\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\nchr1\t103\t.\tG\tA\t.\t.\tCSQ=A|missense_variant|MODERATE|GENE1|gene1|Transcript|tx1|protein_coding\nchr1\t150\t.\tG\tA\t.\t.\tCSQ=A|synonymous_variant|LOW|GENE1|gene1|Transcript|tx1|protein_coding\n" > /opt/taffish/share/vep/smoke/filter-input.vcf; \
     chmod -R a+rX /opt/taffish
 
 USER vep
@@ -43,14 +49,23 @@ RUN set -eux; \
     INSTALL.pl --help 2>&1 | grep -F "default = ${VEP_CACHE_VERSION}" >/dev/null; \
     perl -MBio::EnsEMBL::VEP::Constants -e 'print join(qq(.), $Bio::EnsEMBL::VEP::Constants::VEP_VERSION, $Bio::EnsEMBL::VEP::Constants::VEP_SUB_VERSION), qq(\n)' | grep -Fx "${VEP_VERSION}" >/dev/null; \
     perl -MJSON -e 'print qq(JSON ok\n)' | grep -Fx "JSON ok" >/dev/null; \
+    perl -MHTML::TableExtract -e 'print qq(HTML table parser ok\n)' | grep -Fx "HTML table parser ok" >/dev/null; \
     perl -MBio::DB::HTS -e 'print qq(HTS ok\n)' | grep -Fx "HTS ok" >/dev/null; \
     perl -MBio::DB::BigFile -e 'print qq(BigFile ok\n)' | grep -Fx "BigFile ok" >/dev/null; \
     command -v bgzip >/dev/null; \
     command -v tabix >/dev/null; \
     command -v htsfile >/dev/null; \
     command -v genesplicer >/dev/null; \
+    command -v flock >/dev/null; \
+    command -v df >/dev/null; \
+    command -v sum >/dev/null; \
+    command -v sha256sum >/dev/null; \
+    test "$VEP_DIR_CACHE" = /opt/taffish/vep-cache; \
+    test -d "$VEP_DIR_CACHE"; \
     test -s /plugins/CADD.pm; \
-    test -s /plugins/AlphaMissense.pm
+    test -s /plugins/AlphaMissense.pm; \
+    vep-install-data-116 --dry-run --species homo_sapiens --assembly GRCh38 | grep -F "Dataset ID: homo_sapiens--GRCh38" >/dev/null; \
+    if vep-install-data-116 --dry-run --species all --assembly GRCh38; then exit 1; fi
 
 RUN set -eux; \
     tmp=/tmp/taf-vep-build-check; \
