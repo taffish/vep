@@ -1,0 +1,172 @@
+#!/usr/bin/python3
+"""显式资源 recipe 的获取与只读共享；不替用户选数据库或修改插件。"""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+from urllib.parse import urlsplit
+
+MANIFEST = 'TAFFISH_VEP_PLUGIN_MANIFEST.json'
+READY = 'TAFFISH_VEP_PLUGIN_READY'
+
+
+def digest(path, algorithm='sha256'):
+    h = hashlib.new(algorithm)
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(8 * 1024**2), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def verify(root):
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('Prepared plugin root is not a regular directory')
+    paths = list(root.rglob('*'))
+    if any(p.is_symlink() or not (p.is_file() or p.is_dir()) for p in paths):
+        raise ValueError('Symlink/special file in plugin root')
+    manifest = json.loads((root / MANIFEST).read_text())
+    if manifest['schema'] != 'taffish.vep.plugin-data.v1':
+        raise ValueError('Invalid plugin manifest schema')
+    if (root / READY).read_text().strip() != digest(root / MANIFEST):
+        raise ValueError('Plugin manifest digest mismatch')
+    observed = {str(p.relative_to(root)): {'bytes': p.stat().st_size, 'sha256': digest(p)}
+                for p in paths if p.is_file() and p not in (root / MANIFEST, root / READY)}
+    if not observed or observed != manifest['inventory']:
+        raise ValueError('Plugin inventory mismatch: missing, extra or corrupt file')
+    return manifest
+
+
+def recipe(path):
+    data = json.loads(path.read_text())
+    if data.get('schema') != 'taffish.vep.plugin-recipe.v1':
+        raise ValueError('Invalid recipe schema')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]*', data.get('id', '')) or data['id'] in ('all', '.', '..'):
+        raise ValueError('Recipe requires one exact, safe member ID; never all')
+    for key in ('version', 'assembly', 'license', 'citation'):
+        if not isinstance(data.get(key), str) or not data[key].strip():
+            raise ValueError(f'Recipe requires explicit {key}')
+    if not isinstance(data.get('files'), list) or not data['files']:
+        raise ValueError('Recipe must include files')
+    seen = set()
+    generated = set()
+    for item in data['files']:
+        name = item['name']
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.+-]*', name) or name in (MANIFEST, READY) or name in seen:
+            raise ValueError('Unsafe or duplicate member filename')
+        seen.add(name)
+        url = urlsplit(item['url'])
+        if url.scheme != 'https' or not url.hostname or url.username or url.password or url.fragment:
+            raise ValueError('Downloads require an explicit HTTPS URL without credentials/fragment')
+        algorithm = 'sha256' if 'sha256' in item else 'md5'
+        if not re.fullmatch('[0-9a-f]{' + str(64 if algorithm == 'sha256' else 32) + '}', item.get(algorithm, '')):
+            raise ValueError('Require fixed SHA-256 or official MD5')
+        if not isinstance(item.get('bytes'), int) or item['bytes'] <= 0:
+            raise ValueError('Require exact published compressed byte size')
+        if item.get('index') not in (None, 'alphamissense', 'vcf'):
+            raise ValueError('Supported index modes: alphamissense or vcf; supply other prebuilt indices as members')
+        if item.get('index'):
+            generated.add(name + '.tbi')
+    if seen & generated:
+        raise ValueError('Generated index collides with a recipe member')
+    return data
+
+
+def main():
+    p = argparse.ArgumentParser(description='Install a checksum-pinned, explicitly selected VEP plugin resource for personal/site read-only reuse.')
+    p.add_argument('--spec', type=Path, help='Resource recipe JSON; see README for schema')
+    p.add_argument('--member', choices=['alphamissense-hg38-20230803'], help='Bundled fixed official recipe')
+    p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--accept-terms', action='store_true', help='Confirm your intended use and sharing comply with the recipe resource terms')
+    p.add_argument('--verify-root', type=Path, help='Deep verify an installed read-only member; no writes')
+    a = p.parse_args()
+    staging = None
+    try:
+        if a.verify_root:
+            if a.spec or a.member or a.accept_terms or a.dry_run:
+                raise ValueError('--verify-root cannot be combined with installation options')
+            verify(a.verify_root)
+            print(f'Verified plugin member: {a.verify_root}')
+            return
+        if bool(a.spec) == bool(a.member):
+            raise ValueError('Select exactly one --spec or --member')
+        spec = a.spec or Path('/opt/taffish/share/vep/resources') / (a.member + '.json')
+        data = recipe(spec)
+        frozen = json.dumps(data, sort_keys=True).encode()
+        identity = hashlib.sha256(frozen).hexdigest()
+        print(json.dumps(data, indent=2), flush=True)
+        if a.dry_run:
+            return
+        if not a.accept_terms:
+            raise ValueError('Review resource terms, then explicitly use --accept-terms')
+        mount = Path('/data-install')
+        mounted = any(line.split()[4] == '/data-install' for line in Path('/proc/self/mountinfo').read_text().splitlines())
+        if not mounted or os.environ.get('TAFFISH_VEP_DATA_INSTALL_MOUNTED') != '1':
+            raise ValueError('Set TAFFISH_VEP_DATA_INSTALL_ROOT: an actual persistent /data-install bind is required')
+        root = mount / 'plugins'
+        if root.is_symlink():
+            raise ValueError('Unsafe plugin install root')
+        if not root.exists():
+            root.mkdir(mode=0o755)
+            os.chmod(root, 0o755)
+        dest = root / data['id']
+        lock = root / ('.' + data['id'] + '.lock')
+        with os.fdopen(os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'w') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if dest.exists() or dest.is_symlink():
+                old = verify(dest)
+                if old['recipe_sha256'] != identity:
+                    raise ValueError('Existing member has a different recipe; choose a new immutable member ID')
+                print(f'Existing complete member retained: {dest}')
+                return
+            if shutil.disk_usage(root).free < sum(f['bytes'] for f in data['files']) * 3:
+                raise ValueError('Insufficient free space: need at least 3x compressed member size')
+            cache = root / ('.' + data['id'] + '.downloads')
+            if cache.is_symlink():
+                raise ValueError('Unsafe download cache')
+            cache.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(cache, 0o700)
+            staging = Path(tempfile.mkdtemp(prefix='.' + data['id'] + '.staging-', dir=root))
+            for item in data['files']:
+                path = cache / item['name']
+                partial = cache / (item['name'] + '.part')
+                if path.is_symlink() or partial.is_symlink():
+                    raise ValueError('Unsafe download file')
+                if not path.exists():
+                    subprocess.run(['curl', '--fail', '--location', '--proto', '=https', '--proto-redir', '=https',
+                                    '--retry', '4', '--connect-timeout', '30', '--continue-at', '-',
+                                    '--output', str(partial), item['url']], check=True)
+                    partial.rename(path)
+                algorithm = 'sha256' if 'sha256' in item else 'md5'
+                if path.stat().st_size != item['bytes'] or digest(path, algorithm) != item[algorithm]:
+                    raise ValueError(f'Corrupt download retained for diagnosis: {path}; remove only that file before retry')
+                installed = staging / item['name']
+                shutil.copyfile(path, installed)
+                if item.get('index'):
+                    args = ['-s', '1', '-b', '2', '-e', '2', '-S', '1'] if item['index'] == 'alphamissense' else ['-p', 'vcf']
+                    subprocess.run(['tabix'] + args + [str(installed)], check=True)
+            inventory = {p.name: {'bytes': p.stat().st_size, 'sha256': digest(p)} for p in staging.iterdir()}
+            manifest = {'schema': 'taffish.vep.plugin-data.v1', 'recipe_sha256': identity, 'recipe': data, 'inventory': inventory}
+            (staging / MANIFEST).write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
+            (staging / READY).write_text(digest(staging / MANIFEST) + '\n')
+            for path in staging.iterdir():
+                os.chmod(path, 0o644)
+            verify(staging)
+            os.chmod(staging, 0o755)
+            staging.rename(dest)
+            staging = None
+            print(f'Plugin member ready: {dest}')
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        p.exit(2, f'vep-install-plugin-data: {error}\n')
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging)
+
+
+if __name__ == '__main__':
+    main()

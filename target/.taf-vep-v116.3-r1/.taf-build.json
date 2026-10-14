@@ -1,0 +1,6 @@
+{
+  "artifact": "taf-vep-v116.3-r1",
+  "schema": "taffish.build/v1",
+  "source_sha256": "8d3d01a1ac9f38403d75fe869206bdefc26bd827630f6f58a28db1ca36ff8622",
+  "wrapper_sha256": "cb957314dfe0e6b8e820b7a760f80d1c899ea90f73b874ba5d94e4fe6effc281"
+}

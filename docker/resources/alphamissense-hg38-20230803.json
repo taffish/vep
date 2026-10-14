@@ -1,0 +1,17 @@
+{
+  "schema": "taffish.vep.plugin-recipe.v1",
+  "id": "alphamissense-hg38-20230803",
+  "version": "2023-08-03.gcs-1691073413649109",
+  "assembly": "GRCh38",
+  "license": "AlphaMissense Database Copyright (2023) DeepMind Technologies Limited; CC-BY-4.0; Google Cloud Platform terms apply. https://creativecommons.org/licenses/by/4.0/legalcode",
+  "citation": "Cheng et al. Accurate proteome-wide missense variant effect prediction with AlphaMissense. https://doi.org/10.1126/science.adg7492",
+  "files": [
+    {
+      "name": "AlphaMissense_hg38.tsv.gz",
+      "url": "https://storage.googleapis.com/download/storage/v1/b/dm_alphamissense/o/AlphaMissense_hg38.tsv.gz?generation=1691073413649109&alt=media",
+      "bytes": 642961469,
+      "md5": "9fd167735f16a1b87da6eb3e4c25fcb5",
+      "index": "alphamissense"
+    }
+  ]
+}

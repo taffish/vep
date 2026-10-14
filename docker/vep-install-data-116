@@ -8,11 +8,12 @@ use Fcntl qw(:flock);
 use File::Find qw(find);
 use File::Path qw(make_path remove_tree);
 use File::Spec;
+use File::Temp qw(tempdir);
 use Getopt::Long qw(GetOptions);
 use JSON;
 
-my $APP_RELEASE = '116.2-r1';
-my $VEP_VERSION = '116.2';
+my $APP_RELEASE = '116.3-r1';
+my $VEP_VERSION = '116.3';
 my $CACHE_VERSION = '116';
 my $INSTALL_MOUNT = '/data-install';
 my $DATA_ROOT = "$INSTALL_MOUNT/release-$CACHE_VERSION";
@@ -21,14 +22,18 @@ my $INVENTORY = 'TAFFISH_VEP_DATA_INVENTORY.tsv';
 my $READY = 'TAFFISH_VEP_DATA_READY';
 
 my ($species, $assembly);
+my $verify_root;
 my $minimum_free_gb = 10;
-my ($force, $verify_only, $dry_run, $help) = (0, 0, 0, 0);
+my ($force, $verify_only, $dry_run, $help, $recover, $resolve) = (0, 0, 0, 0, 0, 0);
 
 GetOptions(
   'species=s'    => \$species,
   'assembly=s'   => \$assembly,
+  'verify-root=s' => \$verify_root,
   'min-free-gb=f' => \$minimum_free_gb,
   'force'        => \$force,
+  'recover'      => \$recover,
+  'resolve'      => \$resolve,
   'verify-only'  => \$verify_only,
   'dry-run'      => \$dry_run,
   'help'         => \$help,
@@ -48,51 +53,72 @@ die "vep-install-data-116: --min-free-gb cannot be negative\n"
   if $minimum_free_gb < 0;
 die "vep-install-data-116: --force and --verify-only cannot be combined\n"
   if $force && $verify_only;
+die "vep-install-data-116: --recover must be used without install/verification/plan options\n"
+  if $recover && ($force || $verify_only || $dry_run || $resolve || defined $verify_root);
+die "vep-install-data-116: --resolve requires --dry-run and no install/verification options\n"
+  if $resolve && (!$dry_run || $force || $verify_only || defined $verify_root);
 
 my $dataset_id = "$species--$assembly";
 my $destination = "$DATA_ROOT/$dataset_id";
 my $base_species = $species;
 $base_species =~ s/_(?:refseq|merged)\z//;
+my $fasta_release = $assembly eq 'GRCh37' ? 75 : $CACHE_VERSION;
 
 print_plan();
-exit 0 if $dry_run;
+if ($dry_run) {
+  print_resolved_plan() if $resolve;
+  exit 0;
+}
 
+if (defined $verify_root) {
+  die "--verify-root cannot be combined with --force\n" if $force;
+  verify_dataset($verify_root, 1);
+  print "Verified read-only dataset: $verify_root\n";
+  exit 0;
+}
 require_install_mount();
+if ($verify_only) {
+  verify_dataset($destination, 1);
+  print "Verified dataset: $destination\n";
+  exit 0;
+}
 make_real_directory($DATA_ROOT);
-require_free_space($DATA_ROOT, $minimum_free_gb);
 
 my $lock_path = "$DATA_ROOT/.taffish-vep-release-$CACHE_VERSION.lock";
+die "unsafe lock path: $lock_path\n" if -l $lock_path;
 open(my $lock, '>>', $lock_path)
   or die "vep-install-data-116: cannot open lock $lock_path: $!\n";
 chmod 0644, $lock_path;
 flock($lock, LOCK_EX | LOCK_NB)
   or die "vep-install-data-116: another VEP data operation holds $lock_path\n";
 
-if ($verify_only) {
-  verify_dataset($destination, 1);
-  print "Verified dataset: $destination\n";
+die "vep-install-data-116: destination must not be a symlink: $destination\n" if -l $destination;
+if ($recover) {
+  recover_transactions();
   exit 0;
 }
-
+my @stale = transaction_paths();
 if (-e $destination && !$force) {
   verify_dataset($destination, 1);
   print "Existing complete dataset retained: $destination\n";
+  warn "vep-install-data-116: unfinished transaction remains; run the same species/assembly with --recover\n" if @stale;
   exit 0;
 }
+verify_dataset($destination, 1) if -e $destination;
+require_free_space($DATA_ROOT, $minimum_free_gb);
 
-my @stale = grep { -e $_ } glob("$DATA_ROOT/.$dataset_id.staging-*");
-push @stale, grep { -e $_ } glob("$DATA_ROOT/.$dataset_id.backup-*");
 if (@stale) {
-  die "vep-install-data-116: unfinished transaction data requires review: " .
+  die "vep-install-data-116: unfinished transaction; run --recover for this exact species/assembly before retry: " .
       join(', ', @stale) . "\n";
 }
 
-my $staging = "$DATA_ROOT/.$dataset_id.staging-$$";
-mkdir($staging, 0755)
-  or die "vep-install-data-116: cannot create staging directory $staging: $!\n";
+my $staging = tempdir(".$dataset_id.staging-XXXXXXXX", DIR => $DATA_ROOT, CLEANUP => 0);
+my $download_root = "$DATA_ROOT/.downloads/$dataset_id";
+my @downloads;
 
 my $installed = eval {
   local $ENV{VEP_NO_UPDATE} = 1;
+  @downloads = prepare_downloads($download_root);
   my @command = (
     'INSTALL.pl',
     '--AUTO', 'cf',
@@ -101,7 +127,8 @@ my $installed = eval {
     '--CACHEDIR', $staging,
     '--CACHE_VERSION', $CACHE_VERSION,
     '--NO_UPDATE',
-    '--USE_HTTPS_PROTO',
+    '--CACHEURL', "$download_root/cache",
+    '--FASTAURL', "$download_root/fasta",
   );
   print "Running official installer for one exact dataset member\n";
   system(@command);
@@ -111,6 +138,10 @@ my $installed = eval {
   my $cache_dir = "$staging/$species/${CACHE_VERSION}_$assembly";
   die "expected cache/FASTA directory is missing: $cache_dir\n"
     unless -d $cache_dir;
+  my @fasta = glob("$cache_dir/*.fa.gz");
+  die "reference FASTA or prebuilt index missing\n"
+    unless @fasta == 1 && -s "$fasta[0].fai" && -s "$fasta[0].gzi";
+  remove_tree("$staging/tmp") if -d "$staging/tmp";
 
   my $inventory = build_inventory($staging);
   die "installed dataset contains no regular files\n" unless @$inventory;
@@ -133,10 +164,11 @@ my $installed = eval {
     components => ['indexed_vep_cache', 'reference_fasta'],
     cache_archive => "${species}_vep_${CACHE_VERSION}_${assembly}.tar.gz",
     cache_base_url => "https://ftp.ensembl.org/pub/release-$CACHE_VERSION/variation/indexed_vep_cache",
-    cache_integrity => 'official POSIX CHECKSUMS verified by Ensembl INSTALL.pl; installed files recorded with SHA-256',
-    fasta_base_url => "https://ftp.ensembl.org/pub/release-$CACHE_VERSION/fasta/$base_species/dna",
+    downloads => \@downloads,
+    cache_integrity => 'official CHECKSUMS (sum -r value and blocks) plus archive and installed SHA-256',
+    fasta_base_url => "https://ftp.ensembl.org/pub/release-$fasta_release/fasta/$base_species/dna",
     fasta_selection => 'primary_assembly.fa.gz, falling back to toplevel.fa.gz',
-    fasta_integrity => 'official HTTPS acquisition; installed files recorded with SHA-256',
+    fasta_integrity => 'official CHECKSUMS (sum -r value and blocks) plus archive and installed SHA-256',
     file_count => scalar(@$inventory),
     total_bytes => $total_bytes,
     inventory_sha256 => sha256_hex($inventory_text),
@@ -152,7 +184,10 @@ my $installed = eval {
 
 unless ($installed) {
   my $error = $@ || 'unknown installation failure';
-  remove_tree($staging) if -e $staging;
+  if (-e $staging) {
+    eval { remove_transaction_tree($staging) };
+    warn "vep-install-data-116: staging cleanup incomplete; use --recover: $@" if $@;
+  }
   die "vep-install-data-116: $error";
 }
 
@@ -165,17 +200,16 @@ if (-e $destination) {
 
 unless (rename($staging, $destination)) {
   my $error = $!;
-  rename($backup, $destination) if defined($backup) && -e $backup;
+  if (defined($backup) && -e $backup && !rename($backup, $destination)) {
+    die "vep-install-data-116: promotion failed ($error); rollback failed ($!); preserve $backup and run --recover\n";
+  }
   die "vep-install-data-116: atomic promotion failed: $error\n";
 }
 
 if (defined $backup) {
-  my $errors = [];
-  remove_tree($backup, {error => $errors});
-  if (@$errors) {
-    unlink "$destination/$READY";
-    die "vep-install-data-116: replacement succeeded but old backup cleanup failed: $backup\n";
-  }
+  # 新成员已经验证并提交；旧备份清理失败不能使正确的新 READY 失效。
+  eval { remove_transaction_tree($backup) };
+  warn "vep-install-data-116: replacement committed; backup cleanup pending: $backup; run --recover. $@" if $@;
 }
 
 print "Dataset ready: $destination\n";
@@ -195,8 +229,12 @@ Options:
   --assembly NAME      Exact assembly identifier, e.g. GRCh38.
   --min-free-gb N      Minimum free space before install (default: 10).
   --dry-run            Print identity, sources and integrity plan without writing.
+  --resolve            With --dry-run: fetch CHECKSUMS/HEAD, show exact files/sizes.
   --verify-only        Deep-verify an existing manifest and SHA-256 inventory.
+  --verify-root PATH   Deep-verify a read-only prepared member; no writes/lock.
   --force              Atomically replace an existing verified dataset.
+  --recover            Restore a verified backup if needed; discard interrupted
+                       staging/old backups safely. Keep download cache for retry.
   --help               Show this help.
 
 Host install root:
@@ -215,11 +253,117 @@ sub print_plan {
   print "Cache archive: ${species}_vep_${CACHE_VERSION}_${assembly}.tar.gz\n";
   print "Cache source: https://ftp.ensembl.org/pub/release-$CACHE_VERSION/variation/indexed_vep_cache\n";
   print "Cache integrity: official CHECKSUMS plus installed SHA-256 inventory\n";
-  print "FASTA source: https://ftp.ensembl.org/pub/release-$CACHE_VERSION/fasta/$base_species/dna\n";
+  print "FASTA source: https://ftp.ensembl.org/pub/release-$fasta_release/fasta/$base_species/dna\n";
   print "FASTA selection: primary assembly, falling back to toplevel\n";
-  print "Published compressed size: resolved by the official installer; not fixed in this app because the release directory is an upstream selectable catalog\n";
+  print "Published compressed size: unknown in offline plan; add --resolve to fetch official CHECKSUMS and HEAD metadata\n";
   print "Minimum free space: $minimum_free_gb GiB\n";
   print "Resource license: Ensembl data and source-database terms apply separately; see the app README\n";
+}
+
+sub transaction_paths {
+  my @paths = (glob("$DATA_ROOT/.$dataset_id.staging-*"),
+               glob("$DATA_ROOT/.$dataset_id.backup-*"));
+  for my $path (@paths) {
+    my @st = lstat($path);
+    die "unsafe transaction path; preserve for administrator review: $path\n"
+      unless @st && -d _ && !-l _ && $st[4] == $> &&
+      $path =~ m{^\Q$DATA_ROOT/.$dataset_id\E\.(?:staging-[A-Za-z0-9_-]+|backup-[0-9]+)$};
+  }
+  return @paths;
+}
+
+sub remove_transaction_tree {
+  my ($path) = @_;
+  my @st = lstat($path);
+  die "unsafe cleanup root: $path\n" unless @st && -d _ && !-l _ && $st[4] == $> &&
+    $path =~ m{^\Q$DATA_ROOT/.$dataset_id\E\.(?:staging-[A-Za-z0-9_-]+|backup-[0-9]+)$};
+  my $errors;
+  remove_tree($path, {safe => 1, error => \$errors});
+  die "transaction cleanup incomplete: $path; preserve it and retry --recover after correcting its ownership/permissions\n"
+    if @$errors || -e $path || -l $path;
+}
+
+sub recover_transactions {
+  my @paths = transaction_paths();
+  my @backups = grep { /\.backup-[0-9]+$/ } @paths;
+  if (-e $destination) {
+    # 不删除唯一完整副本：先确认当前成员完整，再回收旧事务。
+    verify_dataset($destination, 1);
+    print "Recovery retained verified current dataset: $destination\n";
+  } elsif (@backups) {
+    die "ambiguous backups; preserve all for manual review\n" unless @backups == 1;
+    verify_dataset($backups[0], 1);
+    rename($backups[0], $destination) or die "cannot restore verified backup: $!\n";
+    print "Recovery restored verified backup: $destination\n";
+  }
+  for my $path (@paths) {
+    next unless -e $path || -l $path;
+    remove_transaction_tree($path);
+    print "Recovery removed interrupted transaction: $path\n";
+  }
+  print "Recovery complete; download cache retained. Rerun the installation command if needed.\n";
+}
+
+sub checksum_entry {
+  my ($text, $name) = @_;
+  my @lines = grep { /\s\Q$name\E\s*$/ } split /\n/, $text;
+  die "missing/ambiguous official CHECKSUMS entry: $name\n" unless @lines == 1;
+  my ($sum, $blocks) = $lines[0] =~ /^\s*(\d+)\s+(\d+)\s+\Q$name\E\s*$/;
+  die "invalid CHECKSUMS entry: $name\n" unless defined $blocks;
+  return (0+$sum, 0+$blocks);
+}
+
+sub selected_fasta {
+  my ($text) = @_;
+  my $prefix = ucfirst($base_species) . ".$assembly";
+  my @files = map { /\s(\S+)\s*$/ ? $1 : () } split /\n/, $text;
+  my @selected = grep { /^\Q$prefix\E(?:\.75)?\.dna\.primary_assembly\.fa\.gz$/ } @files;
+  @selected = grep { /^\Q$prefix\E(?:\.75)?\.dna\.toplevel\.fa\.gz$/ } @files unless @selected;
+  die "missing/ambiguous matching primary assembly or toplevel FASTA\n" unless @selected == 1;
+  return $selected[0];
+}
+
+sub https_metadata {
+  my ($url, $head) = @_;
+  my @args = ('curl', '--silent', '--show-error', '--fail', '--location',
+              '--proto', '=https', '--proto-redir', '=https', '--retry', '2',
+              '--retry-delay', '1', '--connect-timeout', '20', '--max-time', '90');
+  push @args, '--head' if $head;
+  open(my $pipe, '-|', @args, $url) or die "cannot resolve HTTPS metadata: $!\n";
+  my $text = do {local $/; <$pipe>} // '';
+  close($pipe) or die "HTTPS metadata unavailable: $url\n";
+  return $text;
+}
+
+sub print_resolved_plan {
+  my $cache_base = "https://ftp.ensembl.org/pub/release-$CACHE_VERSION/variation/indexed_vep_cache";
+  my $fasta_base = "https://ftp.ensembl.org/pub/release-$fasta_release/fasta/$base_species/dna";
+  my $ct = https_metadata("$cache_base/CHECKSUMS", 0);
+  my $ft = https_metadata("$fasta_base/CHECKSUMS", 0);
+  my @files;
+  for my $spec ([$cache_base, "${species}_vep_${CACHE_VERSION}_${assembly}.tar.gz", $ct],
+                [$fasta_base, selected_fasta($ft), $ft]) {
+    my ($base, $name, $checksums) = @$spec;
+    my ($sum, $blocks) = checksum_entry($checksums, $name);
+    my $headers = eval { https_metadata("$base/$name", 1) };
+    my $head_error = $@;
+    # redirect/proxy 响应的长度不代表最终文件，只取最后一个 HTTP 响应块。
+    my @responses = split /(?=^HTTP\/\S+\s+\d+)/m, ($headers // '');
+    my @lengths = ($responses[-1] // '') =~ /^content-length:\s*(\d+)\s*\r?$/gmi;
+    my $bytes = @lengths ? 0+$lengths[-1] : undef;
+    push @files, {filename => $name, url => "$base/$name", bytes => $bytes,
+      bytes_note => defined($bytes) ? 'HTTP Content-Length' : ($head_error ? 'HEAD unavailable; use official block upper bound' : 'HEAD omits Content-Length; use official block upper bound'),
+      official_sum_r => $sum, official_blocks => $blocks,
+      compressed_bytes_upper_bound => $blocks * 1024,
+      checksum_catalog_url => "$base/CHECKSUMS", checksum_catalog_sha256 => sha256_hex($checksums)};
+  }
+  print "Resolved official resource plan (metadata only; archives are not downloaded):\n";
+  print JSON->new->canonical(1)->pretty(1)->encode({schema => 'taffish.vep.resource-plan.v1',
+    dataset_id => $dataset_id, cache_version => $CACHE_VERSION, fasta_release => $fasta_release,
+    files => \@files, minimum_free_gb => $minimum_free_gb,
+    integrity => 'official sum-r and blocks; archive SHA256 recorded after acquisition',
+    license => 'Ensembl data and source-provider terms; see README',
+    space_note => 'Reserve compressed downloads plus extracted data, indices, and any existing member for --force'});
 }
 
 sub require_install_mount {
@@ -293,6 +437,69 @@ sub file_sha256 {
   return $digest->hexdigest;
 }
 
+# 下载与事务由封装管理；数据解包/索引仍调用未修改的官方 INSTALL.pl。
+sub fetch {
+  my ($url, $path, $resume) = @_;
+  die "unsafe download destination: $path\n" if -l $path || -l "$path.part";
+  my @curl = ('curl', '--fail', '--location', '--proto', '=https', '--proto-redir', '=https',
+              '--retry', '4', '--retry-delay', '2', '--connect-timeout', '30');
+  push @curl, ('--continue-at', '-') if $resume && -s "$path.part";
+  system(@curl, '--output', "$path.part", $url) == 0
+    or die "download failed; rerun the same command to resume $path.part\n";
+  rename("$path.part", $path) or die "cannot promote download: $!\n";
+}
+
+sub checked_download {
+  my ($base, $name, $dir, $checksums) = @_;
+  my ($sum, $blocks) = checksum_entry($checksums, $name);
+  my $path = "$dir/$name";
+  fetch("$base/$name", $path, 1) unless -f $path;
+  die "unsafe archive: $path\n" if -l $path;
+  open(my $pipe, '-|', 'sum', '-r', $path) or die "cannot run sum\n";
+  my $actual = <$pipe> // ''; close($pipe) or die "sum failed\n";
+  my ($got_sum, $got_blocks) = $actual =~ /^(\d+)\s+(\d+)/;
+  die "CHECKSUMS mismatch: $path; preserve it for diagnosis, remove only this corrupt download before retry\n"
+    unless defined($got_blocks) && $got_sum == $sum && $got_blocks == $blocks;
+  return {url => "$base/$name", filename => $name, bytes => -s $path,
+          sha256 => file_sha256($path), official_sum_r => 0+$sum, official_blocks => 0+$blocks,
+          checksum_catalog_sha256 => sha256_hex($checksums)};
+}
+
+sub prepare_downloads {
+  my ($root) = @_;
+  for my $path ("$DATA_ROOT/.downloads", $root, "$root/cache", "$root/fasta",
+                "$root/fasta/$base_species", "$root/fasta/$base_species/dna") {
+    die "unsafe download directory: $path\n" if -l $path;
+    mkdir($path, 0700) unless -e $path;
+    die "invalid download directory: $path\n" unless -d $path;
+    chmod 0700, $path or die "cannot protect $path\n";
+  }
+  my $cache_base = "https://ftp.ensembl.org/pub/release-$CACHE_VERSION/variation/indexed_vep_cache";
+  my $fasta_base = "https://ftp.ensembl.org/pub/release-$fasta_release/fasta/$base_species/dna";
+  fetch("$cache_base/CHECKSUMS", "$root/cache/CHECKSUMS", 0);
+  fetch("$fasta_base/CHECKSUMS", "$root/fasta/$base_species/dna/CHECKSUMS", 0);
+  my @receipts;
+  open(my $ch, '<', "$root/cache/CHECKSUMS") or die $!;
+  my $ct = do {local $/; <$ch>}; close $ch;
+  my $archive = "${species}_vep_${CACHE_VERSION}_${assembly}.tar.gz";
+  push @receipts, checked_download($cache_base, $archive, "$root/cache", $ct);
+  # 在交给上游 tar 前拒绝路径穿越、链接和特殊文件；不修改其合法成员。
+  open(my $names, '-|', 'tar', '-tzf', "$root/cache/$archive") or die $!;
+  while (my $name = <$names>) {
+    chomp $name; $name =~ s{^\./}{};
+    die "unsafe archive member: $name\n" if $name =~ m{(?:\A|/)\.\.(?:/|\z)} ||
+      $name =~ /[\r\t]/ || $name !~ m{^\Q$species\E(?:/|$)};
+  }
+  close $names or die "invalid cache tar archive\n";
+  open(my $types, '-|', 'tar', '-tvzf', "$root/cache/$archive") or die $!;
+  while (my $line = <$types>) {die "cache archive contains a link/special file\n" unless $line =~ /^[d-]/;}
+  close $types or die "invalid cache tar metadata\n";
+  open(my $fh, '<', "$root/fasta/$base_species/dna/CHECKSUMS") or die $!;
+  my $ft = do {local $/; <$fh>}; close $fh;
+  push @receipts, checked_download($fasta_base, selected_fasta($ft), "$root/fasta/$base_species/dna", $ft);
+  return @receipts;
+}
+
 sub build_inventory {
   my ($root) = @_;
   my @entries;
@@ -357,10 +564,13 @@ sub verify_dataset {
 
   open(my $ready_handle, '<', "$root/$READY")
     or die "cannot read dataset ready marker: $!\n";
-  my $ready_value = <$ready_handle> // '';
+  my $ready_value = do { local $/; <$ready_handle> } // '';
   close $ready_handle;
   chomp $ready_value;
   die "dataset ready marker mismatch\n" unless $ready_value eq $dataset_id;
+
+  die "dataset inventory digest mismatch\n" unless
+    file_sha256("$root/$INVENTORY") eq ($manifest->{inventory_sha256} || '');
 
   open(my $inventory_handle, '<', "$root/$INVENTORY")
     or die "cannot read dataset inventory: $!\n";
@@ -368,14 +578,22 @@ sub verify_dataset {
   die "dataset inventory header mismatch\n" unless $header eq "path\tsize\tsha256\n";
   my $count = 0;
   my $total = 0;
+  my %seen;
   while (my $line = <$inventory_handle>) {
     chomp $line;
-    my ($relative, $size, $sha256) = split /\t/, $line, -1;
+    my @fields = split /\t/, $line, -1;
+    my ($relative, $size, $sha256) = @fields;
     die "malformed dataset inventory entry\n"
-      unless defined($sha256) && $size =~ /^\d+$/ && $sha256 =~ /^[0-9a-f]{64}$/;
+      unless @fields == 3 && defined($sha256) && $size =~ /^\d+$/ && $sha256 =~ /^[0-9a-f]{64}$/;
     die "unsafe dataset inventory path: $relative\n"
       if $relative eq '' || File::Spec->file_name_is_absolute($relative) ||
-         $relative =~ m{(?:\A|/)\.\.(?:/|\z)};
+         $relative =~ m{(?:\A|/)\.{1,2}(?:/|\z)} || $relative =~ /[\r\n]/ || $relative =~ m{//};
+    die "duplicate inventory path: $relative\n" if $seen{$relative}++;
+    my $ancestor = $root;
+    for my $part (split m{/}, $relative) {
+      $ancestor .= "/$part";
+      die "symlink in inventory path: $ancestor\n" if -l $ancestor;
+    }
     my $path = "$root/$relative";
     die "inventoried file is missing or unsafe: $path\n"
       unless -f $path && !-l $path && (-s $path) == $size;
@@ -385,6 +603,15 @@ sub verify_dataset {
     $total += $size;
   }
   close $inventory_handle;
+  find({no_chdir => 1, wanted => sub {
+    my $path = $File::Find::name;
+    die "symlink in dataset: $path\n" if -l $path;
+    return if -d $path;
+    die "special file in dataset: $path\n" unless -f $path;
+    my $relative = File::Spec->abs2rel($path, $root);
+    return if $relative eq $MANIFEST || $relative eq $INVENTORY || $relative eq $READY;
+    die "uninventoried file: $relative\n" unless $seen{$relative};
+  }}, $root);
   die "dataset inventory is empty\n" unless $count;
   die "dataset manifest file count mismatch\n"
     unless ($manifest->{file_count} || 0) == $count;

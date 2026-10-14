@@ -1,302 +1,339 @@
-# vep
+# taf-vep
 
-`vep` packages Ensembl Variant Effect Predictor (VEP) for TAFFISH.
+Ensembl Variant Effect Predictor **116.3**, TAFFISH release **116.3-r1**.
+Annotate variants with VEP, run its packaged CLI helpers, or view its text
+statistics in an independent standalone offline HTML page.
 
-Package identity:
+## Identity and upstream scope
 
-- name: `vep`
-- command: `taf-vep`
-- kind: `tool`
-- version: `116.2-r1`
-- image: `ghcr.io/taffish/vep:116.2-r1`
-- native platforms: `linux/amd64`, `linux/arm64`
-- TAFFISH app license: Apache-2.0
-- upstream: <https://github.com/Ensembl/ensembl-vep/tree/release/116.2>
+| Identity | Value |
+| --- | --- |
+| Upstream tag | `release/116.3` |
+| Source commit | `f479099e2a9cd86887a48cf5c293fd7a208ddfb9` |
+| Fixed commit archive SHA-256 | `401c50c126e04254ec34993fe5a3c0ba122fa3631114135b1dd5d3ef889f5d42` |
+| Official base OCI index | `sha256:2a46b0ba4ac544a87136aad92af92050ccbbf09098c1ce306d7e88ef7ed19aa3` |
+| Cache / Ensembl API generation | `116`, not `116.3` |
+| Native platforms | `linux/amd64`, `linux/arm64` |
+| App image | `ghcr.io/taffish/vep:116.3-r1` |
 
-## What This App Packages
+The image extends the pinned official VEP image, preserving upstream annotation
+code and packaged plugins. Build and runtime checks compare core CLI files,
+modules and LICENSE against a SHA-256 inventory from the fixed official source.
+No upstream scientific algorithm is patched. This release includes upstream fixes
+for allele-frequency matching/zero values, ncRNA_gene GFF records and custom VCF
+annotations after 3-prime shifting.
+[Upstream release](https://github.com/Ensembl/ensembl-vep/releases/tag/release/116.3).
 
-The runtime is based on the official multi-architecture image
-`ensemblorg/ensembl-vep:release_116.2`, pinned to OCI index digest
-`sha256:b5c4839c194cfcc148dd6a34393623fd4fdb0239d03d29af10c5b5a461ec366a`.
-The upstream tag resolves to commit
-`2cb0bbe216bb31c75de8f8000e2da7ff4fb7b451`; the official tag archive has
-SHA-256 `834e9c9c82ed1b656a655ab126a4596e4808dcd984f5cb72ecb88b48c7ed28f9`.
-
-The image contains:
-
-- `vep`: the default variant consequence annotator
-- `filter_vep`: filtering for VEP text and VCF/CSQ output
-- `haplo`: Haplosaurus phased-haplotype analysis
-- `variant_recoder`: variant identifier and representation conversion
-- `INSTALL.pl` and `convert_cache.pl`: upstream data utilities
-- `vep-install-data-116`: TAFFISH's explicit, shared-safe cache/FASTA installer
-- maintained VEP plugins, Ensembl Perl APIs, Bio::DB::HTS, Bio::DB::BigFile,
-  htslib commands and GeneSplicer support inherited from the official image
-
-The TAFFISH layer adds `HTML::TableExtract`, which the official HTTPS cache and
-FASTA installer path requires but the upstream runtime image does not contain.
-
-## Scope
-
-This app supports the packaged command-line programs, offline Ensembl cache
-annotation, custom GFF3/GTF plus FASTA annotation, compressed output, remote
-database mode when the user intentionally enables networking, and explicit
-plugin data supplied by the user.
-
-The upstream repository also includes a Nextflow entry point, while Ensembl
-offers hosted web and REST VEP services. This container does not package a
-Nextflow runtime, a local Ensembl website, or a local REST/web service. Those
-are separate execution and service surfaces, not an omitted local GUI. The GUI
-and long-running service checklists are therefore not applicable to this CLI
-app.
+VEP, filter_vep, Haplosaurus, Variant Recoder, INSTALL.pl and convert_cache.pl
+remain callable through automatic command mode. INSTALL.pl remains unmodified;
+TAFFISH resource helpers add persistent acquisition, verification and sharing.
+The official image excludes the LoF plugin; it is not silently advertised here.
+Optional plugins retain their own data, dependency, assembly and license needs.
+The hosted Ensembl web interface and REST API are external services, not local
+servers bundled by this app; their network availability is not guaranteed.
 
 ## Usage
 
-Show wrapper and upstream help:
+Install this immutable app release: `taf install vep 116.3-r1`.
+Installed-user help: `taf-vep --help`. Upstream help: `taf-vep -- --help`.
+VEP itself has no standalone `--version`; its help identifies 116.3.
 
 ```sh
-taf-vep --help
-taf-vep -- --help
-taf-vep vep --help
+export TAFFISH_CONTAINER_BACKEND=docker  # or podman / apptainer
+taf-vep -- --gff genes.gff3.gz --fasta genome.fa.gz --format vcf --vcf \
+  --stats_text --stats_file statistics.txt -i variants.vcf -o annotated.vcf
+taf-vep filter_vep --format vcf -i annotated.vcf -o missense.vcf \
+  --filter "'Consequence is missense_variant'"
+taf-vep vep-stats-view --input statistics.txt --output statistics.html
 ```
 
-`vep` has no `--version` option. Its help banner reports
-`ensembl-vep          : 116.2`; `taf-vep --version` reports the TAFFISH wrapper
-version.
+Inputs may be VCF, VEP text, HGVS/identifier/coordinate forms, or custom indexed
+GFF3/GTF plus FASTA. Outputs include VEP text, annotated VCF/CSQ, JSON, statistics
+and warnings. Use new output names by default. VEP overwrites only when
+`--force_overwrite` is requested; the viewer uses `--force`.
+Keep inputs/reference data readable and output directories writable.
 
-Annotate with a prepared cache selected from a standard TAFFISH data root:
+The current TAFFISH automatic command mode requires literal quotes for values
+containing spaces: `--title "'My VEP statistics'"` or
+`--output "'report with spaces.html'"`. This is a wrapper argument boundary,
+not a VEP input-format change. Resource root paths must not contain spaces,
+quotes, colons or control characters.
 
-```sh
-TAFFISH_VEP_DATASET=homo_sapiens--GRCh38 \
-taf-vep -- --cache --offline --species homo_sapiens --assembly GRCh38 \
-  --format vcf --vcf --force_overwrite \
-  -i variants.vcf -o variants.vep.vcf
-```
+## Static statistics viewer
 
-Use explicit custom annotations instead of an Ensembl cache:
+VEP's original HTML contains legacy online Google Charts and remote logos.
+It is preserved, but is not an offline visualization contract. For offline work
+request upstream `--stats_text --stats_file statistics.txt`, then invoke
+`vep-stats-view`. The helper adds a local, standalone HTML presentation and
+does not modify annotation output or upstream HTML.
 
-```sh
-taf-vep -- --gff annotation.gff3.gz --fasta genome.fa.gz \
-  --format vcf --vcf --force_overwrite \
-  -i variants.vcf -o variants.vep.vcf
-```
+It preserves every original section, row, label and value; numeric two-column
+sections are also shown as horizontal bars in upstream order. Bars use a zero
+baseline and a per-section maximum, not a cross-section or percentage scale.
+Counts of variants and transcript consequences do not necessarily share a
+denominator. Original TXT download is byte-identical to the input, with its
+SHA-256 displayed. This viewer is not scientific validation or a diagnostic tool.
 
-Run another packaged command through automatic command mode:
+The page needs no JavaScript, CDN, font download, service, port, GPU or display.
+Native HTML navigation/details and an original-data download work from file://.
+The same generation commands apply to Docker, Podman and Apptainer by selecting
+`TAFFISH_CONTAINER_BACKEND`; copy the resulting HTML to a local browser if
+analysis ran on SSH. No noVNC/service lifecycle is applicable. Reports may contain
+sample metadata, paths and command arguments; apply your normal access policy.
 
-```sh
-taf-vep filter_vep --format vcf \
-  --filter "Consequence is missense_variant" \
-  -i variants.vep.vcf -o missense.vcf --force_overwrite
-taf-vep haplo --help
-taf-vep variant_recoder --help
-```
+## Cache and FASTA resources
 
-## Inputs and Outputs
-
-VEP accepts VCF, its default whitespace-delimited format, HGVS expressions,
-identifiers and coordinate forms according to upstream options. Custom
-GFF3/GTF sources should be bgzip-compressed, tabix-indexed and paired with the
-matching FASTA.
-
-Outputs include VEP text, VCF with `CSQ`, JSON, statistics and warning files.
-`filter_vep`, `haplo` and `variant_recoder` have their own output contracts.
-Explicit output paths and temporary files are written through the ordinary
-TAFFISH working-directory and `/tmp` mappings; the installed runtime and
-prepared cache mount remain read-only during analysis.
-
-## VEP Cache and FASTA Resources
-
-VEP `116.2` still uses Ensembl cache/API generation `116`. Production cache and
-FASTA data are large, species- and assembly-specific resources and are not
-embedded in the runtime image. Plugin datasets such as CADD, AlphaMissense,
-SpliceAI, dbNSFP, ClinVar and gnomAD remain separately selected resources.
-
-The smallest unit managed by `vep-install-data-116` is one exact
-`SPECIES--ASSEMBLY` member containing the indexed cache and matching primary
-assembly (or upstream toplevel fallback) FASTA. `all`, wildcard and implicit
-selection are rejected. For example, preview a human GRCh38 install without
-writing or accessing the network:
+The smallest managed unit is one explicit cache-116 species/assembly plus its
+matching reference FASTA, e.g. `homo_sapiens--GRCh38`.
+RefSeq/merged caches use their exact species suffix and the corresponding VEP
+`--refseq`/`--merged` analysis option. No implicit `all` selection is accepted.
 
 ```sh
-taf-vep vep-install-data-116 --dry-run \
-  --species homo_sapiens --assembly GRCh38
-```
-
-### Personal installation
-
-Choose Docker, Podman or Apptainer with the ordinary backend selector. The
-wrapper turns `TAFFISH_VEP_DATA_INSTALL_ROOT` into the app-intrinsic writable
-`/data-install` mount; the helper refuses an ephemeral unmounted install.
-
-```sh
-ROOT="$HOME/.local/share/taffish/databases/vep"
-mkdir -p "$ROOT"
-TAFFISH_CONTAINER_BACKEND=docker \
-TAFFISH_VEP_DATA_INSTALL_ROOT="$ROOT" \
-taf-vep vep-install-data-116 \
-  --species homo_sapiens --assembly GRCh38
-```
-
-Use `TAFFISH_CONTAINER_BACKEND=podman` or `apptainer` for the same helper. The
-completed member is
-`$ROOT/release-116/homo_sapiens--GRCh38`. Installation uses an exclusive lock,
-a same-filesystem staging directory, the official Ensembl HTTPS installer and
-cache `CHECKSUMS`, then records an actual per-file SHA-256 inventory, manifest
-and ready marker before atomic promotion. Existing data are accepted only
-after deep verification; use `--verify-only` to audit and `--force` only for an
-intentional atomic replacement. A killed transaction is retained as an exact
-staging/backup path and blocks later installation until an administrator has
-inspected and removed or recovered it.
-
-The upstream selectable catalog does not publish one immutable whole-family
-size in this app. `--dry-run` therefore reports size as unknown and states the
-selection and integrity policy; installation enforces an adjustable free-space
-floor (`--min-free-gb`, default 10 GiB). A production human cache can be much
-larger than that floor, so operators should inspect the current Ensembl member
-size before downloading.
-
-### Site-wide installation
-
-An administrator can prepare one standard root through a designated installer
-account, then make it root-owned and read-only for ordinary users:
-
-```sh
-sudo mkdir -p /usr/local/share/taffish/databases/vep
-sudo chown "$(id -u):$(id -g)" /usr/local/share/taffish/databases/vep
-TAFFISH_VEP_DATA_INSTALL_ROOT=/usr/local/share/taffish/databases/vep \
+mkdir -p "$HOME/.local/share/taffish/databases/vep"
+export TAFFISH_VEP_DATA_INSTALL_ROOT="$HOME/.local/share/taffish/databases/vep"
+taf-vep vep-install-data-116 --dry-run --species homo_sapiens --assembly GRCh38
+# Optional online metadata resolution; no archive download or disk writes:
+taf-vep vep-install-data-116 --dry-run --resolve --species homo_sapiens --assembly GRCh38
 taf-vep vep-install-data-116 --species homo_sapiens --assembly GRCh38
-sudo chown -R root:root /usr/local/share/taffish/databases/vep
-sudo chmod -R a+rX,go-w /usr/local/share/taffish/databases/vep
+unset TAFFISH_VEP_DATA_INSTALL_ROOT
+TAFFISH_VEP_DATASET=homo_sapiens--GRCh38 taf-vep -- --cache --offline \
+  --species homo_sapiens --assembly GRCh38 -i variants.vcf -o annotated.vcf --vcf
 ```
 
-`/opt/taffish/databases/vep` is the second standard site root. Ordinary users
-do not need root, network or write access after the administrator completes the
-installation.
+Set the backend explicitly to Docker, Podman or Apptainer before either command.
+The wrapper binds the explicit installation parent at /data-install and rejects
+an absent parent. The helper requires both the marker and an actual mount; a
+marker alone cannot turn an ephemeral container directory into a managed install.
+Completed members are `release-116/SPECIES--ASSEMBLY` below that parent.
 
-### Discovery, override and disable controls
+The helper fetches official HTTPS CHECKSUMS and exactly selected archives, verifies
+both `sum -r` fields, records downloaded SHA-256, checks cache archive paths/types,
+then delegates unpacking/indexing to unmodified INSTALL.pl using local archives.
+FASTA selection is primary_assembly, then toplevel, with an exact assembly match;
+GRCh37 FASTA comes from Ensembl release 75. Missing checksums/FASTA/index fail closed.
+Official CHECKSUMS is a transport-integrity check, not a cryptographic publisher
+signature; acquisition is protected by HTTPS and recorded SHA-256 thereafter.
 
-Set `TAFFISH_VEP_DATASET` to an exact member ID. The wrapper searches, in order:
+Downloads/partials remain in a private .downloads directory for retry/resume.
+A release lock, private staging, deep inventory checks and atomic promotion guard
+installation; `--force` first verifies the old member and preserves it until the
+replacement is ready. A failed preparation leaves that old member unchanged.
+Corrupt complete downloads are retained for diagnosis with an exact retry message.
+The ordinary dry-run is an offline identity/source plan. `--dry-run --resolve`
+fetches official CHECKSUMS and HTTP HEAD metadata, reporting exact selected cache
+and FASTA names/URLs, official sum-r/block checksums, catalog SHA-256 and compressed
+bytes when Content-Length is supplied. Otherwise it reports unknown bytes and the
+official block upper bound explicitly. It does not download archives or create a
+lock/staging directory; a missing or ambiguous catalog entry fails closed.
+The default 10 GiB free-space threshold is only a minimum, not an estimate of human
+cache size. Allow for compressed archives, unpacked data/indices, and the old member
+during replacement. A resolved plan records metadata at that time, not a promise
+that the upstream catalog can never change; installation records its own receipts.
 
-1. `~/.local/share/taffish/databases/vep/release-116/<member>`
-2. `/usr/local/share/taffish/databases/vep/release-116/<member>`
-3. `/opt/taffish/databases/vep/release-116/<member>`
-
-It validates the manifest, inventory and ready marker, resolves symlinks to a
-physical host path and mounts only that member read-only at
-`/opt/taffish/vep-cache`. VEP reads that stable path through its supported
-`VEP_DIR_CACHE` setting. It does not choose a species or assembly for the user.
-Set `TAFFISH_VEP_DATA_PATH` to an exact prepared member for an explicit
-override, or `TAFFISH_VEP_AUTO_MOUNT=0` to disable discovery. An invalid
-explicit root or member fails closed rather than silently falling back to
-another dataset.
-
-For RefSeq or merged cache members, use the exact upstream species member name
-when installing and pass VEP's corresponding `--refseq` or `--merged` option at
-analysis time.
-
-### Manual backend fallback
-
-Automatic resource mounts use the same stable container path on all three
-backends. If site policy requires manual mounts, disable automatic discovery:
+After a normal download failure, retry the same installation command; valid partial
+archives resume. If the process was killed or a staging/backup remains, keep the
+same explicit installation parent and run:
 
 ```sh
-TAFFISH_VEP_AUTO_MOUNT=0 \
-TAFFISH_DOCKER_RUN_ARGS="-v /abs/member:/opt/taffish/vep-cache:ro" \
-taf-vep -- --cache --offline -i variants.vcf -o out.txt
-
-TAFFISH_VEP_AUTO_MOUNT=0 \
-TAFFISH_PODMAN_RUN_ARGS="-v /abs/member:/opt/taffish/vep-cache:ro" \
-taf-vep -- --cache --offline -i variants.vcf -o out.txt
-
-TAFFISH_VEP_AUTO_MOUNT=0 \
-TAFFISH_APPTAINER_RUN_ARGS="--bind /abs/member:/opt/taffish/vep-cache:ro" \
-taf-vep -- --cache --offline -i variants.vcf -o out.txt
+taf-vep vep-install-data-116 --species homo_sapiens --assembly GRCh38 --recover
+# Then rerun installation, adding --force only when intentionally replacing data.
 ```
 
-## Backend and Platform Matrix
+Recovery takes the release lock, verifies the current member before discarding old
+transactions, or restores the single verified backup when the member is absent.
+It discards only this member's owned, non-symlink staging/backup directories and
+retains download cache. Invalid current data, ambiguous backups, unsafe paths or
+foreign ownership stop recovery for manual review; it does not guess or erase them.
+After successful promotion, failure to delete an old backup prints **replacement
+committed; backup cleanup pending** and exits successfully: new READY remains valid.
+Correct only the named backup's permissions if appropriate, then use `--recover`.
+Do not start recovery while an installation is running or manually delete a sole
+backup. Recovery/installation uses the same Docker/Podman/Apptainer selection above.
 
-| Capability | Docker | Podman | Apptainer | Boundary |
-| --- | --- | --- | --- | --- |
-| CLI and custom GFF/FASTA | Native amd64/arm64 image | Native amd64/arm64 image | OCI-derived SIF on native Linux | Exact validation status is recorded below |
-| Prepared cache member | Automatic read-only volume | Automatic read-only volume | Automatic read-only bind | Explicit member selection; stable `VEP_DIR_CACHE=/opt/taffish/vep-cache` |
-| Data installation | Writable `/data-install` plus host UID/GID | Writable `/data-install` with keep-id | Writable `/data-install` under caller identity | Network is required only during installation |
-| Remote database/REST/plugin lookup | Requires explicit network policy | Requires explicit network policy | Requires explicit network policy | Offline reproducibility should use prepared local data |
+The manifest records exact member/API identity, source receipts, file count/bytes
+and inventory SHA-256. A ready marker is written only after successful checks.
+`--verify-root /opt/taffish/vep-cache --species ... --assembly ...` performs full
+read-only validation without lock, chmod or a free-space requirement.
 
-Docker and Podman run VEP under the caller's UID/GID (Podman also uses
-`keep-id`), so inputs and outputs inside private user directories keep host
-ownership and remain accessible. Apptainer already executes as the caller.
+### Personal and system-wide reuse
 
-The platform and backend evidence axes are independent: both declared native
-OCI platforms must run real VEP functionality, while each public backend must
-pass exact smoke and resource-mount behavior on an architecture-matched native
-Linux host. Uncoupled combinations not separately exercised are reported as
-such rather than treated as native failures.
+Administrators can prepare either /usr/local/share/taffish/databases/vep or
+/opt/taffish/databases/vep once, using the same explicit install-root variable.
+They must first create and own the installation parent; this app never invokes
+sudo or changes unrelated site permissions. Completed member directories/files
+are 0755/0644. Protect parent ownership so ordinary users cannot modify shared data.
 
-## Resource License Boundary
+For `TAFFISH_VEP_DATASET`, discovery checks personal, /usr/local/share and
+/opt/taffish roots in that order. An incomplete or broken-symlink higher-priority root
+fails closed. `TAFFISH_VEP_DATA_PATH` overrides discovery; no selector means no
+automatic cache. The wrapper checks identity/ready metadata and inventory digest,
+then binds the physical root read-only at /opt/taffish/vep-cache.
+This lightweight selection check does not rehash multi-gigabyte payloads;
+run the deep verifier before first use and after suspected storage corruption.
+Use `TAFFISH_VEP_AUTO_MOUNT=0` to disable all automatic data mounts.
 
-Ensembl states that project-generated data are available without restriction,
-while some incorporated data can retain third-party constraints. The cache,
-reference FASTA and plugin datasets therefore remain governed by the Ensembl
-data disclaimer and any source-database terms; the VEP Apache-2.0 software
-license is not used as a substitute for those data terms. See:
+Manual fallbacks (choose the exact species/assembly in the VEP arguments):
 
-- <https://www.ensembl.org/info/about/legal/disclaimer.html>
-- <https://www.ensembl.org/info/about/legal/index.html>
+```sh
+TAFFISH_CONTAINER_BACKEND=docker TAFFISH_VEP_AUTO_MOUNT=0 \
+ TAFFISH_DOCKER_RUN_ARGS="-v /abs/member:/opt/taffish/vep-cache:ro" \
+ taf-vep -- --cache --offline -i variants.vcf -o out.txt
+TAFFISH_CONTAINER_BACKEND=podman TAFFISH_VEP_AUTO_MOUNT=0 \
+ TAFFISH_PODMAN_RUN_ARGS="-v /abs/member:/opt/taffish/vep-cache:ro" \
+ taf-vep -- --cache --offline -i variants.vcf -o out.txt
+TAFFISH_CONTAINER_BACKEND=apptainer TAFFISH_VEP_AUTO_MOUNT=0 \
+ TAFFISH_APPTAINER_RUN_ARGS="--bind /abs/member:/opt/taffish/vep-cache:ro" \
+ taf-vep -- --cache --offline -i variants.vcf -o out.txt
+```
 
-The helper downloads from Ensembl's official release-116 FTP-over-HTTPS paths.
-It does not download third-party plugin datasets.
+Apptainer requires a native Linux host; it is not a macOS runtime.
+Automatic Docker/Podman execution uses the caller's UID; Podman also uses keep-id.
 
-## Boundaries
+## Plugin data, models and custom references
 
-- `INSTALL.pl`, remote database mode, REST calls and plugin-data acquisition can
-  require network access. Normal smoke and recommended production annotation
-  are offline.
-- Packaging QA installed and deep-verified the real Ensembl cache/FASTA member
-  `ciona_savignyi--CSAV2.0`; it did not download a human production member or
-  every selectable species/assembly. This runtime evidence does not establish
-  biological correctness for other resources or analyses.
-- Upstream plugin Perl files in `/plugins` do not imply that licensed or large
-  plugin datasets are bundled.
-- Nextflow, the hosted Ensembl web VEP and hosted REST service are not local
-  components of this CLI app.
+External plugin resources are separate from VEP cache/API identity. This app does
+not load a GPU model; AlphaMissense uses precomputed scores. Public mechanical
+resources are not exempted merely because they are optional. The versioned
+`vep-install-plugin-data` helper accepts an explicit fixed recipe and installs one
+member under `plugins/ID`, with resume/retry, checksum and byte-size checks, lock,
+private staging, generated indices, SHA-256 inventory and atomic promotion.
+Existing matching complete members are reused; different/corrupt members fail
+closed. There is no destructive --force; choose a new immutable ID for new data.
 
-## Validation
+A bundled recipe pins AlphaMissense hg38 to official GCS generation
+1691073413649109 (2023-08-03), 642961469 compressed bytes, official MD5.
+After installation all files and generated tabix indices have SHA-256 inventory.
 
-The release smoke contract checks exact VEP `116.2` identity, cache generation
-`116`, main helper commands, Perl/HTS/BigWig modules, HTTPS installer parsing,
-plugin files and compression/index utilities. It runs `filter_vep` on synthetic
-VCF/CSQ data, real offline VEP annotation with tiny GFF3/FASTA/VCF fixtures, and
-the repaired `--compress_output gzip` path. Resource tests additionally cover
-explicit selection, no-`all`, mounted installation refusal, manifest/inventory
-validation, read-only reuse and backend mount construction.
+```sh
+taf-vep vep-install-plugin-data --member alphamissense-hg38-20230803 --dry-run
+# Set TAFFISH_VEP_DATA_INSTALL_ROOT as for cache installation above.
+# Review resource terms before explicitly opting in:
+taf-vep vep-install-plugin-data --member alphamissense-hg38-20230803 --accept-terms
+unset TAFFISH_VEP_DATA_INSTALL_ROOT
+export TAFFISH_VEP_PLUGIN_DATASET=alphamissense-hg38-20230803
+# Add to the regular VEP annotation command:
+# --plugin AlphaMissense,file=/opt/taffish/vep-plugin-data/AlphaMissense_hg38.tsv.gz
+taf-vep vep-install-plugin-data --verify-root /opt/taffish/vep-plugin-data
+```
 
-The final candidate passed every manifest command in disconnected containers:
-Docker and Podman each passed 62/62 direct plus read-only-root checks on native
-amd64 Linux, and the OCI-derived read-only SIF passed 31/31 checks with
-Apptainer. The native arm64 OCI candidate independently passed the same 62/62
-Docker matrix. The final wrapper then passed explicit and standard-path
-resource discovery, actual writable install binds, invalid-resource
-fail-closed behavior, and read-only reuse on Docker, Podman and Apptainer. A
-real `ciona_savignyi--CSAV2.0` member (453 files; 87,722,369 bytes) was installed
-through the helper, deep-verified from its SHA-256 inventory, and used for an
-offline cache/FASTA annotation through all three backends. Podman on arm64 and
-Apptainer on arm64 were not separately validated; no backend-specific coupling
-was found that requires those extra combinations.
+The personal/site parent search order is the same as cache data, but under
+`plugins/ID`. Override via `TAFFISH_VEP_PLUGIN_DATA_PATH`; the read-only container
+path is /opt/taffish/vep-plugin-data. Manual mounts use the same three-backend
+examples above with this destination. The wrapper validates manifest digest;
+the verifier validates every payload/index. No plugin is enabled implicitly.
 
-These are packaging and runtime checks, not complete scientific validation on
-production genomes or external annotation databases.
+Other mechanical resources use `--spec recipe.json`: schema
+`taffish.vep.plugin-recipe.v1`; explicit `id`, `version`, `assembly`, `license`,
+`citation`, and a nonempty `files` list. Each member has a safe basename `name`,
+HTTPS `url` without embedded credentials, exact `bytes`, and `sha256` (preferred)
+or official `md5`. Optional `index` is `vcf` or `alphamissense`; provide other
+prebuilt indices as explicit files. The bundled JSON is a complete example.
+A recipe selects known files; it is not an arbitrary shell recipe or model selector.
 
-## Upstream, License and Citation
+Resource licensing and boundaries:
 
-- VEP repository/tag: <https://github.com/Ensembl/ensembl-vep/tree/release/116.2>
-- VEP documentation: <https://www.ensembl.org/info/docs/tools/vep/index.html>
-- CLI documentation: <https://www.ensembl.org/info/docs/tools/vep/script/index.html>
-- cache documentation: <https://www.ensembl.org/info/docs/tools/vep/script/vep_cache.html>
-- official image: <https://hub.docker.com/r/ensemblorg/ensembl-vep>
-- upstream software license: Apache-2.0
+| Resource | Smallest reusable unit and handling |
+| --- | --- |
+| Ensembl cache + FASTA | Exact species/assembly/API member; managed helper above; Ensembl data/source-provider terms, separate from software license. |
+| AlphaMissense | Assembly-specific fixed score table + tabix index; managed fixed recipe; DeepMind CC-BY-4.0 and Google Cloud terms, retain citation. |
+| CADD / CADD-SV | Version/assembly/type score file + index; non-commercial restrictions apply. Obtain appropriate permission and provide a pinned recipe or manually prepared read-only files; no blanket permission is implied. |
+| dbNSFP / SpliceAI | Version/assembly-specific files; constituent predictors and resource licenses differ. User must choose lawful edition/usage, then use recipe acquisition where allowed, or manual read-only import if access requires personal credentials/acceptance. |
+| ClinVar / gnomAD / custom annotations | Version/assembly-specific indexed data; pinned recipes can acquire allowed public files. Scientific field/filter/assembly selection remains explicit. |
+| Project-specific GFF/GTF/FASTA | User input, not an automatically chosen public database; pre-index and mount read-only, retaining input checksums. |
+| Remote Ensembl database / REST | Explicit online mode, not offline resource installation or a local shared database. |
 
-For academic use, cite:
+Plugin data licenses are not inherited from the Apache-2.0 plugin code.
+The helper records terms but does not grant usage rights or authenticate restricted
+services. No production human cache/all-plugin validation is claimed merely from
+tiny fixtures or one representative member.
+[AlphaMissense plugin/data terms](https://github.com/Ensembl/VEP_plugins/blob/release/116/AlphaMissense.pm),
+[CADD plugin](https://github.com/Ensembl/VEP_plugins/blob/release/116/CADD.pm),
+[Ensembl data terms](https://www.ensembl.org/info/about/legal/disclaimer.html).
 
-McLaren W, Gil L, Hunt SE, Riat HS, Ritchie GRS, Thormann A, Flicek P,
-Cunningham F. The Ensembl Variant Effect Predictor. Genome Biology.
-2016;17:122. doi: `10.1186/s13059-016-0974-4`; PMID: `27268795`.
+## Runtime write map and image contents
+
+The host working directory (wrapper's same-path bind): user outputs/statistics/warnings. Custom FASTA/GFF
+indices must exist or be generated in a writable copy. /tmp: independent smoke
+scratch and temporary files. /data-install: explicit persistent resource
+transactions/downloads only. /opt/vep, /plugins and prepared resource mounts:
+read-only during analysis. No build-time or smoke writes to bundled fixtures.
+
+The official image retains Perl/HTS/BigFile, Python2 for upstream plugins,
+GeneSplicer and upstream installation/build dependencies. Python3 hosts the
+TAFFISH standalone viewer/resource helper. We do not remove upstream plugin or
+installation capabilities solely to make a small smoke pass. New apt metadata is
+removed in its installation layer. Image size/profile and any retained build
+dependencies are checked before release; later-layer deletions are not claimed as
+image slimming.
+
+## Validation and release procedure
+
+The 2026-10-11 candidate passed native amd64 and arm64 app-root builds. Exact
+manifest probes passed in fresh offline Docker/Podman containers (normal and
+read-only roots) on both architectures, and in the same amd64 OCI's read-only
+Apptainer SIF: 351 probes total. Final generated-wrapper tests passed on amd64
+Docker/Podman/Apptainer and arm64 Docker/Podman: 120 checks including persistent
+outputs, quoting, ordinary UID, original HTML, offline viewer and read-only cache
+annotation. Earlier local Docker EOF/Podman timeout attempts are retained as
+diagnostics; final reruns passed without changing upstream code.
+
+One official Ciona cache/FASTA member was downloaded, checksum-verified, indexed
+and used for annotation on both architectures. The repaired helper also completed
+a real online --force replacement, followed by 17 three-backend verification,
+annotation, lock/idempotence and different-ordinary-UID checks. Synthetic tiny
+resources with unmodified INSTALL.pl cover 140 transaction/metadata checks across
+the five tested platform/backend combinations: download failure/resume, force,
+cleanup-pending success, promotion rollback, process interruption, safe recovery
+and temporary names containing underscores. HTTPS transport and promotion errors
+are injected only by private QA fixtures, never by patching production code.
+
+72 further checks cover personal/site/opt discovery, priority, explicit override,
+disable, incomplete/dangling roots, physical symlink resolution, deep verification
+and read-only mounts on all three backends. Site paths are isolated in private
+user/mount namespaces; real host site directories are unchanged. These mechanism
+tests do not claim an actual privileged production site installation.
+
+Earlier preparation of this release installed/indexed the fixed full AlphaMissense
+table and verified it through three amd64 backends. The plugin helper, recipe and
+upstream runtime are unchanged by this repair; that large resource was not
+redownloaded for the transaction repair or separately repeated on arm64. Current
+plugin discovery/verification, native tabix and helper negative checks pass. No
+validation of every human cache/plugin or biological use case is claimed.
+
+The independent viewer passed data-preservation/escaping/overwrite tests and
+maintainer-confirmed file-based visual/interaction acceptance. The viewer source
+has no external runtime requests or JavaScript. Browser automation/console capture
+was unavailable; manual acceptance is recorded separately, not presented as an
+automated browser test. Native arm64 Apptainer was not separately validated.
+
+Final image sizes are 933,786,916 bytes (amd64) and 904,644,237 bytes (arm64).
+Actual upstream notices and Debian copyright files are retained. The fixed
+official base's installation/compiler/plugin dependencies remain intentional;
+deleting them in a child layer would not reduce distributed base layers. New apt
+lists are removed in the installation layer. No unsafe capability pruning or
+image-size reduction claim is made. Publication and subsequent Action/Index
+verification remain maintainer-controlled.
+
+Maintainer commands from the app root:
+
+```sh
+taf check
+taf build
+docker build --platform linux/arm64 -f docker/Dockerfile -t ghcr.io/taffish/vep:116.3-r1 .
+# Run exact manifest exist/tests fresh, offline; D/P read-only and actual SIF too.
+taf publish --build --release --dry-run
+```
+
+Both declared native platforms must use app-root context, matching the canonical
+Action. Build-time tests are source/version/import/tiny CLI checks, not browser
+rendering or timing-sensitive GUI assertions. Final cleanup must leave only
+target/.gitkeep after the last build/wrapper/dry-run. Canonical Action is unchanged
+and byte-identical to the fresh taf new template. Publication is manual.
+
+## License and citation
+
+VEP and the TAFFISH packaging use Apache-2.0; upstream dependency and resource
+licenses remain separate. Preserve upstream notices supplied in the fixed image.
+Cite McLaren et al. (2016), *The Ensembl Variant Effect Predictor*,
+Genome Biology 17:122, DOI [10.1186/s13059-016-0974-4](https://doi.org/10.1186/s13059-016-0974-4),
+PMID 27268795, plus any selected plugin/database references.

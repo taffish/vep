@@ -1,0 +1,49 @@
+[package]
+name = "vep"
+kind = "tool"
+version = "116.3"
+release = 1
+license = "Apache-2.0"
+main = "src/main.taf"
+
+[repository]
+url = "https://github.com/taffish/vep"
+
+[command]
+name = "taf-vep"
+
+[runtime]
+pipe = true
+command_mode = true
+
+[container]
+image = "ghcr.io/taffish/vep:116.3-r1"
+dockerfile = "docker/Dockerfile"
+build_platforms = "linux/amd64,linux/arm64"
+
+[meta]
+domain = "bio"
+categories = ["variant-annotation", "genomics", "vcf", "variant-effect", "ensembl"]
+keywords = ["VEP", "Ensembl VEP", "Variant Effect Predictor", "variant annotation", "VCF", "CSQ", "consequence", "Haplosaurus", "Variant Recoder", "filter_vep"]
+description = "Ensembl Variant Effect Predictor (VEP) 116.3 runtime for annotating sequence variants and running related VEP helper tools."
+
+[upstream]
+name = "Ensembl Variant Effect Predictor (VEP)"
+type = "github"
+repo = "Ensembl/ensembl-vep"
+homepage = "https://www.ensembl.org/info/docs/tools/vep/index.html"
+release_url = "https://github.com/Ensembl/ensembl-vep/tree/release/116.3"
+downloads = "docker.io/ensemblorg/ensembl-vep:release_116.3@sha256:2a46b0ba4ac544a87136aad92af92050ccbbf09098c1ce306d7e88ef7ed19aa3; https://codeload.github.com/Ensembl/ensembl-vep/tar.gz/f479099e2a9cd86887a48cf5c293fd7a208ddfb9"
+version = "116.3"
+license = "Apache-2.0"
+citation = "McLaren W, Gil L, Hunt SE, Riat HS, Ritchie GRS, Thormann A, Flicek P, Cunningham F. The Ensembl Variant Effect Predictor. Genome Biology. 2016;17:122."
+doi = "10.1186/s13059-016-0974-4"
+pmid = "27268795"
+watch = "tags"
+strip_prefix = "release/"
+
+[smoke]
+backend = "docker"
+timeout = 240
+exist = ["vep", "filter_vep", "haplo", "variant_recoder", "INSTALL.pl", "convert_cache.pl", "vep-install-data-116", "vep-install-plugin-data", "vep-stats-view", "vep-smoke", "python3", "perl", "curl", "bgzip", "tabix", "htsfile", "genesplicer", "python", "python2", "flock", "df", "sum", "sha256sum", "grep", "which", "gzip", "tar", "unzip"]
+test = ["vep-smoke version", "vep-smoke helpers", "vep-smoke deps", "vep-smoke installer", "vep-smoke plugin-data", "vep-smoke filter", "vep-smoke gff", "vep-smoke gzip", "vep-smoke ncrna", "vep-smoke html"]

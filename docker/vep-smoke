@@ -1,0 +1,92 @@
+#!/bin/sh
+# 每个 mode 可在 fresh/offline/只读容器独立执行；失败先保留日志再清理本轮 scratch。
+set -eu
+mode=${1:-}
+tmp=$(mktemp -d /tmp/vep-smoke.XXXXXXXX)
+finish() {
+  code=$?
+  trap - EXIT
+  if test "$code" -ne 0; then
+    printf 'vep-smoke: %s failed (exit %s)\n' "$mode" "$code" >&2
+    for log in "$tmp"/*.log; do test ! -f "$log" || tail -n 100 "$log" >&2; done
+  fi
+  rm -rf -- "$tmp"
+  exit "$code"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+cd "$tmp"
+case "$mode" in
+  version)
+    vep --help >vep.log 2>&1
+    grep -F 'ensembl-vep          : 116.3' vep.log
+    grep -F 'ENSEMBL VARIANT EFFECT PREDICTOR' vep.log
+    perl -MBio::EnsEMBL::VEP::Constants -e 'print join(qq(.), $Bio::EnsEMBL::VEP::Constants::VEP_VERSION, $Bio::EnsEMBL::VEP::Constants::VEP_SUB_VERSION), qq(\n)' >version.log
+    grep -Fx 116.3 version.log
+    ;;
+  helpers)
+    haplo --help >haplo.log 2>&1; grep -F HAPLOSAURUS haplo.log
+    variant_recoder --help >recoder.log 2>&1; grep -F 'VARIANT RECODER' recoder.log
+    INSTALL.pl --help >install.log 2>&1; grep -F 'default = 116' install.log
+    filter_vep --help >filter.log 2>&1; grep -F 'consequence data' filter.log
+    convert_cache.pl --help >convert.log 2>&1; grep -F '# convert_cache.pl #' convert.log
+    vep-stats-view --help >viewer.log 2>&1; grep -F -- '--input' viewer.log
+    ;;
+  deps)
+    perl -MJSON -MHTML::TableExtract -MDigest::SHA -MFile::Find -MFile::Temp -MGetopt::Long -MBio::DB::HTS -MBio::DB::BigFile -e 'print qq(dependencies ok\n)'
+    tabix --version >tabix.log 2>&1; grep -F htslib tabix.log
+    bgzip --version >bgzip.log 2>&1; grep -F htslib bgzip.log
+    test "$VEP_DIR_CACHE" = /opt/taffish/vep-cache; test -d "$VEP_DIR_CACHE"
+    test -s /plugins/CADD.pm; test -s /plugins/AlphaMissense.pm
+    cd /opt/vep/src/ensembl-vep
+    sha256sum -c /opt/taffish/share/vep/upstream-code.sha256 >"$tmp/source.log" 2>&1
+    ;;
+  installer)
+    vep-install-data-116 --dry-run --species homo_sapiens --assembly GRCh38 >plan.log
+    grep -F 'Dataset ID: homo_sapiens--GRCh38' plan.log
+    if vep-install-data-116 --dry-run --species all --assembly GRCh38 >invalid.log 2>&1; then exit 1; fi
+    if vep-install-data-116 --species ciona_intestinalis --assembly KH >mount.log 2>&1; then exit 1; fi
+    grep -F 'refusing an ephemeral install' mount.log
+    ;;
+  plugin-data)
+    vep-install-plugin-data --member alphamissense-hg38-20230803 --dry-run >plugin-plan.log
+    grep -F '1691073413649109' plugin-plan.log
+    if vep-install-plugin-data --member alphamissense-hg38-20230803 >terms.log 2>&1; then exit 1; fi
+    grep -F 'explicitly use --accept-terms' terms.log
+    if vep-install-plugin-data --member alphamissense-hg38-20230803 --accept-terms >plugin-mount.log 2>&1; then exit 1; fi
+    grep -F 'actual persistent /data-install bind is required' plugin-mount.log
+    ;;
+  filter)
+    filter_vep --format vcf --filter 'Consequence is missense_variant' -i /opt/taffish/share/vep/smoke/filter-input.vcf -o out.vcf >filter.log 2>&1
+    grep -F missense_variant out.vcf
+    if grep -F synonymous_variant out.vcf; then exit 1; fi
+    ;;
+  gff|gzip|ncrna|html)
+    cp /opt/taffish/share/vep/smoke/ref.fa /opt/taffish/share/vep/smoke/input.vcf .
+    cp /opt/taffish/share/vep/smoke/genes.gff3 genes.gff3
+    if test "$mode" = ncrna; then
+      sed 's/\tgene\t/\tncRNA_gene\t/;s/\tmRNA\t/\tlnc_RNA\t/;s/Name=GENE1/Name=GENE1;biotype=lncRNA/;s/Name=TX1/Name=TX1;biotype=lncRNA/' genes.gff3 | grep -v 'CDS' > ncrna.gff3
+      mv ncrna.gff3 genes.gff3
+    fi
+    bgzip genes.gff3; tabix -p gff genes.gff3.gz
+    set -- --gff genes.gff3.gz --fasta ref.fa --format vcf --vcf --species homo_sapiens -i input.vcf
+    if test "$mode" = gzip; then
+      vep "$@" --no_stats --compress_output gzip -o out.vcf.gz >run.log 2>&1
+      gzip -t out.vcf.gz; gzip -dc out.vcf.gz >out.vcf
+    elif test "$mode" = html; then
+      vep "$@" --stats_text --stats_file stats.txt -o out.vcf >run.log 2>&1
+      vep-stats-view --input stats.txt --output stats.html --title 'Tiny VEP statistics' >viewer.log 2>&1
+      grep -F 'No network required' stats.html
+      grep -F 'data:text/plain;base64,' stats.html
+      if vep-stats-view --input stats.txt --output stats.html >overwrite.log 2>&1; then exit 1; fi
+      grep -F 'Output exists' overwrite.log
+    else
+      vep "$@" --no_stats -o out.vcf >run.log 2>&1
+    fi
+    grep -F '##VEP="v116.3"' out.vcf
+    grep -F GENE1 out.vcf
+    if test "$mode" != ncrna; then grep -F missense_variant out.vcf; else grep -F non_coding_transcript out.vcf; fi
+    ;;
+  *) printf 'Usage: vep-smoke version|helpers|deps|installer|plugin-data|filter|gff|gzip|ncrna|html\n' >&2; exit 2;;
+esac
